@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Read(D:\\Users\\habib\\.qwen\\projects\\d--email-agent\\memory/**)",
+      "Read(D:\\Users\\habib\\.qwen/**)",
+      "Read(D:\\Users\\habib\\.qwen\\memories/**)",
+      "Read(C:\\Users\\habib\\.qwen/**)"
+    ]
+  },
+  "$version": 4
+}

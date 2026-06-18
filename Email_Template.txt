@@ -1,0 +1,25 @@
+Subject: [Keyword] Seeking an MS/PhD Position in Your Lab
+
+Dear Professor {{LAST_NAME}},
+
+Greetings!
+
+I am Habib Ur Rehman, a BS Data Analytics graduate from Government College University Faisalabad, Pakistan. My research background is in AI/ML, medical imaging, multimodal learning, deepfake detection, photovoltaic forecasting, and predictive analytics.
+
+I am seeking an MS/PhD position relevant to my previous works:
+
+Medical Imaging with ViT and Perceiver IO — Computational Biology and Chemistry, 2025
+GCViT and Perceiver IO for Multi-Disease Classification — Journal of Supercomputing, 2025
+Multimodal-FNet for Audio-Visual Deepfake Detection — TPAMI, 2026
+Photovoltaic Power Forecasting using Vision Transformer and Time-Series Fusion — 2026
+
+My research experiments are mainly based on CNNs, LSTM/GRU, Vision Transformers, Perceiver IO, GCViT, multimodal fusion, and time-series models using Python, PyTorch, TensorFlow, Scikit-learn, and XGBoost, as provided in my attached resume.
+
+I am particularly interested in your work in {{Professor_Work_3_Keywords}}
+
+I would be glad if you have any open MS/PhD or research assistant positions in your lab.
+
+Thank you for taking the time to read this email. I look forward to your response.
+
+Regards,
+Habib Ur Rehman

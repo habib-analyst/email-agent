@@ -1,0 +1,17 @@
+{
+  "name": "email-agent",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev --prefix backend\" \"wait-on http-get://127.0.0.1:3001/api/health -t 120000 -d 500 && npm run dev --prefix frontend\"",
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "check:backend": "node --check backend/src/server.js && node --check backend/src/routes/index.js && node --check backend/src/routes/upload.js && node --check backend/src/gmail/index.js && node --check backend/src/db/index.js && node --check backend/src/services/senderIdentity.js && node --check backend/src/config/loadApiKeys.js && node --check backend/scripts/smoke.mjs",
+    "smoke": "npm run smoke --prefix backend",
+    "test": "npm run verify",
+    "verify": "npm run check:backend && npm run build --prefix frontend && npm run smoke --prefix backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "wait-on": "^8.0.3"
+  }
+}

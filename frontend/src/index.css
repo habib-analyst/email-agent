@@ -1,0 +1,575 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --surface-page: 248 250 252;
+    --surface-card: 255 255 255;
+    --surface-muted: 241 245 249;
+    --border-default: 226 232 240;
+    --border-subtle: 241 245 249;
+    --text-primary: 15 23 42;
+    --text-secondary: 51 65 85;
+    --text-muted: 71 85 105;
+    --text-subtle: 100 116 139;
+  }
+
+  .dark {
+    color-scheme: dark;
+    --surface-page: 0 0 0;
+    --surface-card: 23 23 23;
+    --surface-elevated: 32 32 32;
+    --surface-muted: 38 38 38;
+    --border-default: 64 64 64;
+    --border-subtle: 48 48 48;
+    --text-primary: 250 250 250;
+    --text-secondary: 229 229 229;
+    --text-muted: 163 163 163;
+    --text-subtle: 115 115 115;
+  }
+
+  * { @apply transition-colors duration-200; }
+  html { @apply overflow-x-hidden; }
+  body {
+    @apply antialiased overflow-x-hidden;
+    background-color: rgb(var(--surface-page));
+    color: rgb(var(--text-primary));
+  }
+  #root { @apply min-h-screen min-w-0; }
+
+  /* Improve default readability for common muted Tailwind combos */
+  .dark .text-gray-900 { color: rgb(var(--text-primary)); }
+  .dark .text-gray-800 { color: rgb(var(--text-secondary)); }
+  .dark .text-gray-700 { color: rgb(var(--text-secondary)); }
+}
+
+@layer components {
+  .page-shell {
+    @apply w-full min-w-0 px-3 sm:px-4 lg:px-5 py-4 sm:py-5 pb-10 space-y-5 overflow-x-hidden;
+  }
+  .app-container {
+    @apply w-full min-w-0 px-3 sm:px-4 lg:px-5;
+  }
+  .app-header-bar {
+    background-color: rgb(var(--surface-card));
+    backdrop-filter: blur(12px);
+  }
+  .panel {
+    @apply rounded-2xl border shadow-sm overflow-hidden;
+    background-color: rgb(var(--surface-card));
+    border-color: rgb(var(--border-subtle));
+  }
+  .panel-header {
+    @apply flex items-center justify-between gap-3 px-4 py-3 border-b;
+    border-color: rgb(var(--border-subtle));
+    background-color: rgb(var(--surface-muted));
+  }
+  .icon-btn {
+    @apply w-9 h-9 rounded-xl flex items-center justify-center transition-colors border border-transparent;
+    background-color: transparent;
+  }
+  .icon-btn:hover {
+    background-color: rgb(var(--surface-muted));
+    border-color: rgb(var(--border-subtle));
+  }
+  .zone-label {
+    @apply text-[10px] font-bold uppercase tracking-wider text-muted;
+  }
+  .header-scroll-x {
+    @apply overflow-x-auto max-w-full overscroll-x-contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .text-primary {
+    color: rgb(var(--text-primary));
+  }
+  .text-secondary {
+    color: rgb(var(--text-secondary));
+  }
+  .text-muted {
+    color: rgb(var(--text-muted));
+  }
+  .text-subtle {
+    color: rgb(var(--text-subtle));
+  }
+  .card {
+    @apply rounded-2xl shadow-sm border;
+    background-color: rgb(var(--surface-card));
+    border-color: rgb(var(--border-subtle));
+  }
+  .section-panel {
+    background-color: rgb(var(--surface-elevated));
+    border: 1px solid rgb(var(--border-subtle));
+    @apply rounded-xl;
+  }
+  .surface-muted {
+    background-color: rgb(var(--surface-muted));
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 bg-brand-600 hover:bg-brand-700 active:bg-brand-800 text-white px-5 py-2.5 rounded-xl font-medium transition-all duration-200 shadow-sm hover:shadow-md active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all duration-200;
+    background-color: rgb(var(--surface-muted));
+    color: rgb(var(--text-secondary));
+  }
+  .btn-secondary:hover {
+    @apply bg-gray-200 dark:bg-neutral-700;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl font-medium transition-all duration-200;
+    color: rgb(var(--text-muted));
+  }
+  .btn-ghost:hover {
+    @apply bg-gray-100 dark:bg-neutral-800;
+    color: rgb(var(--text-primary));
+  }
+  .input {
+    @apply w-full rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-brand-500/50 focus:border-brand-500 transition-all duration-200;
+    background-color: rgb(var(--surface-card));
+    border: 1px solid rgb(var(--border-default));
+    color: rgb(var(--text-primary));
+  }
+  .input::placeholder {
+    color: rgb(var(--text-subtle));
+  }
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-semibold;
+  }
+  .sidebar-link {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200;
+  }
+  .sidebar-link-active {
+    @apply sidebar-link bg-brand-50 dark:bg-brand-900/30 text-brand-700 dark:text-brand-300 border border-brand-200 dark:border-brand-800;
+  }
+  .sidebar-link-inactive {
+    @apply sidebar-link text-muted hover:bg-gray-100 dark:hover:bg-neutral-800 hover:text-primary;
+  }
+  .step-badge {
+    @apply flex items-center justify-center w-6 h-6 rounded-full bg-brand-600 text-white text-[10px] font-bold shrink-0;
+  }
+  .bg-surface-page {
+    background-color: rgb(var(--surface-page));
+  }
+  .time-bar-strip {
+    background: linear-gradient(to bottom, rgb(240 249 255 / 0.95), rgb(224 242 254 / 0.85));
+    backdrop-filter: blur(8px);
+  }
+  .dark .time-bar-strip {
+    background: linear-gradient(to bottom, rgb(23 23 23 / 0.98), rgb(10 10 10 / 0.98));
+    border-color: rgb(var(--border-subtle));
+  }
+
+  /* Neutral dark surfaces — avoid blue-tinted gray/slate in dark mode */
+  .dark .dark\:bg-gray-950,
+  .dark .dark\:bg-gray-950\/95,
+  .dark .dark\:bg-gray-950\/98 {
+    background-color: rgb(var(--surface-page)) !important;
+  }
+  .dark .dark\:bg-gray-900,
+  .dark .dark\:bg-gray-900\/95,
+  .dark .dark\:bg-gray-900\/90,
+  .dark .dark\:bg-gray-900\/80,
+  .dark .dark\:bg-gray-900\/50,
+  .dark .dark\:bg-gray-900\/30,
+  .dark .dark\:bg-gray-900\/20,
+  .dark .dark\:bg-gray-900\/10 {
+    background-color: rgb(var(--surface-card)) !important;
+  }
+  .dark .dark\:bg-gray-800,
+  .dark .dark\:bg-gray-800\/50,
+  .dark .dark\:bg-gray-800\/30 {
+    background-color: rgb(var(--surface-muted)) !important;
+  }
+  .dark .dark\:bg-blue-900\/40,
+  .dark .dark\:bg-blue-900\/30,
+  .dark .dark\:bg-blue-900\/25,
+  .dark .dark\:bg-blue-900\/20,
+  .dark .dark\:bg-blue-900\/10,
+  .dark .dark\:bg-blue-950\/40,
+  .dark .dark\:bg-indigo-900\/40,
+  .dark .dark\:bg-indigo-900\/30,
+  .dark .dark\:bg-indigo-900\/20,
+  .dark .dark\:bg-violet-900\/30,
+  .dark .dark\:bg-violet-900\/20,
+  .dark .dark\:bg-violet-900\/10,
+  .dark .dark\:bg-emerald-900\/40,
+  .dark .dark\:bg-emerald-900\/30,
+  .dark .dark\:bg-emerald-900\/20,
+  .dark .dark\:bg-teal-900\/20,
+  .dark .dark\:bg-sky-900\/40,
+  .dark .dark\:bg-sky-900\/30,
+  .dark .dark\:bg-sky-950\/40,
+  .dark .dark\:bg-slate-900\/30,
+  .dark .dark\:bg-slate-900\/20,
+  .dark .dark\:bg-brand-900\/30,
+  .dark .dark\:bg-brand-950\/40 {
+    background-color: rgb(var(--surface-elevated)) !important;
+  }
+  .dark .dark\:border-gray-800,
+  .dark .dark\:border-gray-800\/80,
+  .dark .dark\:border-gray-800\/60 {
+    border-color: rgb(var(--border-subtle)) !important;
+  }
+  .dark .dark\:border-gray-700,
+  .dark .dark\:border-gray-700\/80,
+  .dark .dark\:border-gray-600 {
+    border-color: rgb(var(--border-default)) !important;
+  }
+  .dark .dark\:from-gray-900,
+  .dark .dark\:from-sky-950\/30,
+  .dark .dark\:from-blue-950\/30,
+  .dark .dark\:from-blue-950\/20,
+  .dark .dark\:from-emerald-950\/30,
+  .dark .dark\:from-indigo-950\/30,
+  .dark .dark\:from-violet-950\/30,
+  .dark .dark\:from-slate-900 {
+    --tw-gradient-from: rgb(var(--surface-card)) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgb(var(--surface-card) / 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+  }
+  .dark .dark\:to-gray-950,
+  .dark .dark\:to-gray-900 {
+    --tw-gradient-to: rgb(var(--surface-page)) var(--tw-gradient-to-position) !important;
+  }
+  .dark .bg-brand-50,
+  .dark .bg-brand-50\/40,
+  .dark .bg-brand-50\/50 {
+    background-color: rgb(var(--surface-card)) !important;
+  }
+  .dark .dark\:bg-black,
+  .dark .dark\:bg-black\/98 {
+    background-color: rgb(var(--surface-page)) !important;
+  }
+  .dark .dark\:bg-neutral-900,
+  .dark .dark\:bg-neutral-900\/95,
+  .dark .dark\:bg-neutral-900\/80 {
+    background-color: rgb(var(--surface-card)) !important;
+  }
+  .dark .dark\:bg-neutral-800,
+  .dark .dark\:bg-neutral-800\/80,
+  .dark .dark\:bg-neutral-800\/60,
+  .dark .dark\:bg-neutral-800\/50,
+  .dark .dark\:bg-neutral-800\/20 {
+    background-color: rgb(var(--surface-muted)) !important;
+  }
+  .dark .dark\:border-neutral-800,
+  .dark .dark\:border-neutral-700,
+  .dark .dark\:border-neutral-600 {
+    border-color: rgb(var(--border-subtle)) !important;
+  }
+}
+
+/* ─── Gmail Chrome compose (matches Gmail in Chrome) ─── */
+.gmail-compose-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0 16px;
+}
+.gmail-chrome-compose {
+  font-family: 'Roboto', Arial, sans-serif;
+  background: #fff;
+  border: 1px solid #dadce0;
+  border-radius: 8px 8px 0 0;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.08);
+  overflow: hidden;
+  width: 100%;
+  max-width: 720px;
+}
+.gmail-chrome-compose-float {
+  border-radius: 8px;
+}
+.gmail-chrome-template-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #e6f4ea;
+  color: #137333;
+  font-size: 11px;
+  border-bottom: 1px solid #ceead6;
+}
+.gmail-chrome-template-bar strong { font-weight: 600; }
+.gmail-chrome-cc-link {
+  font-size: 13px;
+  color: #5f6368;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+.gmail-chrome-cc-link:hover { color: #202124; text-decoration: underline; }
+.gmail-chrome-row-to { flex-wrap: nowrap; }
+.gmail-chrome-send-group {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+}
+.gmail-chrome-send-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #1a73e8;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 0 20px;
+  height: 36px;
+  border: none;
+  cursor: pointer;
+}
+.gmail-chrome-send-main:hover { background: #1765cc; }
+.gmail-chrome-send-main:disabled { opacity: 0.55; cursor: not-allowed; }
+.gmail-chrome-send-dropdown {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 36px;
+  background: #1a73e8;
+  color: #fff;
+  border: none;
+  border-left: 1px solid #1765cc;
+  cursor: pointer;
+}
+.gmail-chrome-send-dropdown:hover { background: #1765cc; }
+.gmail-chrome-send-dropdown:disabled { opacity: 0.55; cursor: not-allowed; }
+.gmail-chrome-tool-active { background: #e8f0fe !important; color: #1a73e8 !important; }
+.gmail-chrome-attach-pdf {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  background: #fce8e6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.gmail-chrome-body-frame {
+  width: 100%;
+  height: 360px;
+  border: none;
+  display: block;
+  background: #fff;
+}
+.gmail-chrome-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #404040;
+  color: #fff;
+  padding: 8px 8px 8px 16px;
+  min-height: 40px;
+}
+.gmail-chrome-header-title {
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+.gmail-chrome-window-btns {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.gmail-chrome-winbtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  color: #e8eaed;
+  background: transparent;
+  border: none;
+  cursor: default;
+}
+.gmail-chrome-winbtn:hover { background: rgba(255,255,255,0.12); }
+.gmail-chrome-winbtn-close:hover { background: rgba(255,255,255,0.2); }
+.gmail-chrome-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #f1f3f4;
+  min-height: 36px;
+}
+.gmail-chrome-row-subject { padding-left: 16px; }
+.gmail-chrome-label {
+  font-size: 14px;
+  color: #5f6368;
+  width: 52px;
+  shrink: 0;
+  flex-shrink: 0;
+}
+.gmail-chrome-from-chip {
+  font-size: 14px;
+  color: #202124;
+  background: #f1f3f4;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.gmail-chrome-recipients { font-size: 14px; }
+.gmail-chrome-subject-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  color: #202124;
+  font-family: inherit;
+  background: transparent;
+}
+.gmail-chrome-body-wrap {
+  background: #fff;
+  min-height: 280px;
+}
+.gmail-chrome-body-frame {
+  width: 100%;
+  height: 320px;
+  border: none;
+  display: block;
+  background: #fff;
+}
+.gmail-chrome-attachments {
+  padding: 8px 16px;
+  border-top: 1px solid #f1f3f4;
+  background: #fff;
+}
+.gmail-chrome-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 8px;
+  border: 1px solid #dadce0;
+  border-radius: 16px;
+  background: #f8f9fa;
+  max-width: 280px;
+}
+.gmail-chrome-attach-name {
+  font-size: 13px;
+  color: #202124;
+  font-weight: 500;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gmail-chrome-attach-meta { font-size: 11px; color: #5f6368; }
+.gmail-chrome-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-top: 1px solid #f1f3f4;
+  background: #fff;
+}
+.gmail-chrome-send-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #1a73e8;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  padding: 0 24px;
+  height: 36px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+}
+.gmail-chrome-send-btn:hover { background: #1765cc; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.gmail-chrome-send-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+/* legacy send btn kept for compat */
+.gmail-chrome-send-btn {
+  display: none;
+}
+.gmail-chrome-toolbar-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid #e8eaed;
+}
+.gmail-chrome-tool {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  color: #5f6368;
+  cursor: pointer;
+}
+.gmail-chrome-tool:hover { background: #f1f3f4; color: #202124; }
+.gmail-chrome-tool:disabled { opacity: 0.4; cursor: not-allowed; }
+.gmail-chrome-agent-panel {
+  padding: 12px 16px;
+  border-top: 1px solid #e8eaed;
+  background: #f8f9fa;
+}
+.gmail-chrome-sent-picker {
+  border-top: 1px solid #e8eaed;
+  max-height: 180px;
+  overflow-y: auto;
+  background: #fff;
+}
+.gmail-chrome-sent-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  font-size: 13px;
+  border: none;
+  border-bottom: 1px solid #f1f3f4;
+  background: #fff;
+  cursor: pointer;
+}
+.gmail-chrome-sent-item:hover { background: #f1f3f4; }
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.animate-shimmer {
+  animation: shimmer 1.5s infinite;
+}
+
+/* Legacy email editor */
+.email-editor-body {
+  background: #ffffff !important;
+  color: #222222 !important;
+}
+.email-editor-body * {
+  color: inherit;
+}
+
+/* Restore list styles inside the email editor (Tailwind resets them) */
+[contenteditable] ul, [contenteditable] ol {
+  list-style: revert;
+  padding-left: 2em;
+  margin: 0.5em 0;
+}
+[contenteditable] ul { list-style-type: disc; }
+[contenteditable] ol { list-style-type: decimal; }
+[contenteditable] li { display: list-item; }
+[contenteditable] b, [contenteditable] strong { font-weight: bold; }
+[contenteditable] i, [contenteditable] em { font-style: italic; }
+[contenteditable] u { text-decoration: underline; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { @apply bg-gray-300 dark:bg-neutral-700 rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-gray-400 dark:bg-neutral-600; }

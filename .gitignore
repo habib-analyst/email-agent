@@ -1,0 +1,18 @@
+node_modules/
+.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+dist/
+.tokens.json
+.token-key
+API-Keys.txt
+API-Keys/
+uploads/
+backend/user-data/
+backend/exports/
+Faculty emails/
+Resume/
+Email Scraping by codex/
+backend/VERIFICATION_COMPLETE.md

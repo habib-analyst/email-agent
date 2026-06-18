@@ -1,0 +1,297 @@
+AdventHealth University FL 2026 AK University of Alaska Anchorage 2026 
+Alabama State University AL 2026 AL Alabama State University 2026 
+Allegany College of Maryland MD 2026 AL Auburn University 2026 
+Alvernia University PA 2026 AL Auburn University at Montgomery 2026 
+Appalachian State University NC 2026 AL The University of Alabama 2026 
+Arizona State University AZ 2026 AL The University of Alabama at Birmingham 2026 
+Auburn University AL 2026 AR University of Central Arkansas 2026 
+Auburn University at Montgomery AL 2026 AZ Arizona State University 2026 
+Augusta University GA 2026 AZ Grand Canyon University 2026 
+Azusa Pacific University CA 2026 CA Azusa Pacific University 2026 
+Ball State University IN 2026 CA California State University Channel Islands 2026 
+Bates College ME 2026 CA California State University San Marcos 2026 
+Bellarmine University KY 2024 CA California State University, Chico 2026 
+Belmont University TN 2024 CA California State University, Fresno 2026 
+Berea College KY 2026 CA California State University, Monterey Bay 2026 
+Berry College GA 2026 CA California State University, Northridge 2026 
+Boise State University ID 2024 CA California State University, Sacramento 2026 
+Bristol Community College MA 2026 CA California State University, San Bernardino 2024 
+Brown University RI 2026 CA California State University, Stanislaus 2026 
+Bucknell University PA 2026 CA College of the Canyons 2024 
+Butler University IN 2026 CA Dominican University of California 2026 
+California State University Channel Islands CA 2026 CA Loma Linda University 2026 
+California State University San Marcos CA 2026 CA Occidental College 2026 
+California State University, Chico CA 2026 CA Oxnard College 2026 
+California State University, Fresno CA 2026 CA Pitzer College 2024 
+California State University, Monterey Bay CA 2026 CA Saint Mary’s College of California 2024 
+California State University, Northridge CA 2026 CA San Diego State University 2026 
+California State University, Sacramento CA 2026 CA San Francisco State University 2026 
+
+The Carnegie Foundation for the Advancement of Teaching All Currently Classified Institutions (classified in 2026+2024)
+
+### Institutions, By Alphabetical Order Institutions, By State
+
+California State University, San Bernardino CA 2024 CA University of California, Davis 2026 
+California State University, Stanislaus CA 2026 CA University of California, Los Angeles 2026 
+Central College IA 2024 CA University of California, Merced 2026 
+Central Connecticut State University CT 2026 CA University of California, Riverside 2024 
+Clark University MA 2026 CA University of San Diego 2026 
+Clemson University SC 2026 CA University of the Pacific 2026 
+Coastal Carolina University SC 2026 CO Colorado State University 2026 
+Colgate University NY 2026 CO Metropolitan State University of Denver 2026 
+College of Saint Benedict MN 2026 CO University of Colorado Boulder 2026 
+College of the Canyons CA 2024 CO University of Denver 2024 
+College of the Holy Cross MA 2026 CT Central Connecticut State University 2026 
+Colorado State University CO 2026 CT Fairfield University 2026 
+Community College of Philadelphia PA 2026 CT Quinnipiac University 2026 
+Cornell University NY 2026 CT Trinity College 2026 
+D’Youville University NY 2024 CT University of Connecticut 2024 
+Davidson College NC 2026 DC The George Washington University 2026 
+DePaul University IL 2026 DE University of Delaware 2026 
+Dominican University of California CA 2026 FL AdventHealth University 2026 
+Drexel University PA 2026 FL Florida Atlantic University 2026 
+Duke University NC 2026 FL Florida Gulf Coast University 2026 
+Duquesne University PA 2024 FL Florida International University 2026 
+East Carolina University NC 2024 FL Florida State University 2026 
+East Tennessee State University TN 2026 FL Miami Dade College 2026 
+Eastern Michigan University MI 2026 FL Nova Southeastern University 2026 
+Elizabethtown College PA 2026 FL Rollins College 2026 
+Elon University NC 2026 FL University of Central Florida 2024 
+Emory University GA 2026 FL University of Florida 2026 
+Fairfield University CT 2026 FL University of Miami 2026 
+Farmingdale State College NY 2026 FL University of North Florida 2026 
+Florida Atlantic University FL 2026 FL University of South Florida 2026 
+Florida Gulf Coast University FL 2026 FL University of West Florida 2024 
+Florida International University FL 2026 GA Augusta University 2026 
+Florida State University FL 2026 GA Berry College 2026 
+Fort Hays State University KS 2026 GA Emory University 2026 
+Franciscan Missionaries of Our Lady University LA 2026 GA Georgia College & State University 2026 
+Georgia College & State University GA 2026 GA Georgia Southern University 2026 
+Georgia Southern University GA 2026 GA Mercer University 2026 
+Gettysburg College PA 2026 GA Morehouse School of Medicine 2026 
+Gonzaga University WA 2026 GA Spelman College 2026 
+Grand Canyon University AZ 2026 GA University of Georgia 2026 
+Grand Valley State University MI 2026 HI University of Hawaiʻi at Mānoa 2026 
+High Point University NC 2024 IA Central College 2024 
+Illinois State University IL 2026 IA University of Iowa 2026 
+Indiana University Bloomington IN 2026 IA University of Northern Iowa 2026 
+Indiana University Indianapolis IN 2026 ID Boise State University 2024 
+Indiana University Southeast IN 2026 IL DePaul University 2026 
+James Madison University VA 2026 IL Illinois State University 2026 
+John Carroll University OH 2026 IL Loyola University Chicago 2024 
+Juniata College PA 2026 IL National Louis University 2026 
+Kansas State University KS 2026 IL Northern Illinois University 2026 
+La Salle University PA 2026 IL Rockford University 2026 
+Loma Linda University CA 2026 IL The Chicago School 2026 
+Louisiana State University and Agricultural and Mechanical 
+College 
+LA 2026 IL University of Illinois Urbana-Champaign 2026 
+Loyola University Chicago IL 2024 IL Wilbur Wright College 2024 
+Loyola University Maryland MD 2026 IN Ball State University 2026 
+Marquette University WI 2026 IN Butler University 2026 
+Maryville College TN 2026 IN Indiana University Bloomington 2026 
+Massachusetts College of Art and Design MA 2026 IN Indiana University Southeast 2026 
+Medical College of Wisconsin WI 2026 IN Indiana University Indianapolis 2026 
+Mercer University GA 2026 IN Purdue University 2026 
+Mercyhurst University PA 2026 IN University of Indianapolis 2026 
+Merrimack College MA 2026 IN University of Southern Indiana 2026 
+Metropolitan State University of Denver CO 2026 KS Fort Hays State University 2026 
+Miami Dade College FL 2026 KS Kansas State University 2026 
+Michigan State University MI 2026 KS The University of Kansas 2026 
+Middlebury College VT 2026 KY Bellarmine University 2024 
+Middlesex College NJ 2026 KY Berea College 2026 
+Mississippi State University MS 2026 KY Morehead State University 2026 
+Missouri State University MO 2026 KY Northern Kentucky University 2026 
+Molloy University NY 2026 KY University of Kentucky 2026 
+Montana State University MT 2026 KY University of Louisville 2026 
+Montclair State University NJ 2026 LA Franciscan Missionaries of Our Lady University 2026 
+Morehead State University KY 2026 LA 
+
+## Louisiana State University and Agricultural and Mechanical College
+
+2026 
+Morehouse School of Medicine GA 2026 LA Tulane University 2026 
+Muhlenberg College PA 2026 LA University of Louisiana at Lafayette 2026 
+National Louis University IL 2026 MA Bristol Community College 2026 
+Nazareth University NY 2026 MA Clark University 2026 
+New Mexico State University NM 2026 MA College of the Holy Cross 2026 
+New York University NY 2026 MA Massachusetts College of Art and Design 2026 
+North Carolina Agricultural and Technical State University NC 2024 MA Merrimack College 2026 
+North Carolina Central University NC 2024 MA Northeastern University 2026 
+North Carolina State University NC 2026 MA Salem State University 2026 
+Northeastern University MA 2026 MA Suffolk University 2026 
+Northern Illinois University IL 2026 MA Tufts University 2024 
+Northern Kentucky University KY 2026 MA University of Massachusetts Amherst 2026 
+Northern Michigan University MI 2026 MA University of Massachusetts Chan Medical School 2026 
+Nova Southeastern University FL 2026 MA University of Massachusetts Dartmouth 2026 
+Oakland University MI 2024 MA University of Massachusetts Lowell 2026 
+Occidental College CA 2026 MA Worcester State University 2024 
+Ohio University OH 2026 MD Allegany College of Maryland 2026 
+Old Dominion University VA 2026 MD Loyola University Maryland 2026 
+Oregon State University OR 2026 MD Salisbury University 2026 
+Owens Community College OH 2026 MD The University of Baltimore 2026 
+Oxnard College CA 2026 MD Towson University 2026 
+Pace University NY 2026 MD University of Maryland Eastern Shore 2026 
+Pitzer College CA 2024 MD University of Maryland, Baltimore 2026 
+Portland Community College OR 2026 MD University of Maryland, Baltimore County 2026 
+Portland State University OR 2024 MD University of Maryland, College Park 2026 
+Purdue University IN 2026 ME Bates College 2026 
+Quinnipiac University CT 2026 MI Eastern Michigan University 2026 
+Raritan Valley Community College NJ 2024 MI Grand Valley State University 2026 
+Rhodes College TN 2026 MI Michigan State University 2026 
+Rockford University IL 2026 MI Northern Michigan University 2026 
+Rockhurst University MO 2026 MI Oakland University 2024 
+Roger Williams University RI 2026 MI Saginaw Valley State University 2026 
+Rollins College FL 2026 MI University of Michigan–Dearborn 2026 
+Rutgers University–Camden NJ 2024 MN College of Saint Benedict 2026 
+Rutgers University–New Brunswick NJ 2026 MN Saint John’s University 2026 
+Rutgers University–Newark NJ 2026 MN St. Catherine University 2026 
+Saginaw Valley State University MI 2026 MN University of Minnesota Crookston 2024 
+Saint Anselm College NH 2024 MN University of Minnesota Duluth 2024 
+Saint John’s University MN 2026 MN University of Minnesota Morris 2026 
+Saint Joseph’s University PA 2026 MN University of Minnesota Rochester 2024 
+Saint Louis University MO 2024 MN University of Minnesota Twin Cities 2026 
+Saint Mary’s College of California CA 2024 MO Missouri State University 2026 
+Saint Peter’s University NJ 2026 MO Rockhurst University 2026 
+Salem State University MA 2026 MO Saint Louis University 2024 
+Salisbury University MD 2026 MO University of Missouri–St. Louis 2026 
+Sam Houston State University TX 2026 MS Mississippi State University 2026 
+San Diego State University CA 2026 MS The University of Southern Mississippi 2026 
+San Francisco State University CA 2026 MS University of Mississippi 2026 
+Seattle University WA 2026 MT Montana State University 2026 
+Siena University NY 2024 MT University of Montana 2026 
+Slippery Rock University of Pennsylvania PA 2026 NC Appalachian State University 2026 
+Southern Methodist University TX 2026 NC Davidson College 2026 
+Spelman College GA 2026 NC Duke University 2026 
+St. Catherine University MN 2026 NC East Carolina University 2024 
+St. John Fisher University NY 2026 NC Elon University 2026 
+State University of New York at Binghamton NY 2026 NC High Point University 2024 
+Suffolk University MA 2026 NC North Carolina Agricultural and Technical State University 2024 
+SUNY Buffalo State University NY 2026 NC North Carolina Central University 2024 
+Swarthmore College PA 2026 NC North Carolina State University 2026 
+Tarleton State University TX 2026 NC University of North Carolina at Charlotte 2026 
+Texas Southern University TX 2026 NC University of North Carolina at Greensboro 2024 
+The Chicago School IL 2026 NC University of North Carolina at Pembroke 2024 
+The Citadel, The Military College of South Carolina SC 2026 NC University of North Carolina Wilmington 2026 
+The College of New Jersey NJ 2026 NE University of Nebraska at Omaha 2026 
+The George Washington University DC 2026 NE University of Nebraska Medical Center 2026 
+The Ohio State University OH 2026 NE University of Nebraska–Lincoln 2024 
+The Pennsylvania State University PA 2026 NH Saint Anselm College 2024 
+The University of Akron OH 2026 NH University of New Hampshire 2024 
+The University of Alabama AL 2026 NJ Middlesex College 2026 
+The University of Alabama at Birmingham AL 2026 NJ Montclair State University 2026 
+The University of Baltimore MD 2026 NJ Raritan Valley Community College 2024 
+The University of Kansas KS 2026 NJ Rutgers University–Camden 2024 
+The University of New Mexico NM 2026 NJ Rutgers University–New Brunswick 2026 
+The University of Scranton PA 2026 NJ Rutgers University–Newark 2026 
+The University of Southern Mississippi MS 2026 NJ Saint Peter’s University 2026 
+The University of Texas at Arlington TX 2026 NJ The College of New Jersey 2026 
+The University of Texas at El Paso TX 2026 NM New Mexico State University 2026 
+The University of Texas at San Antonio TX 2026 NM The University of New Mexico 2026 
+The University of Texas Rio Grande Valley TX 2026 NV University of Nevada, Las Vegas 2026 
+The University of Utah UT 2026 NV University of Nevada, Reno 2026 
+Towson University MD 2026 NY Colgate University 2026 
+Trinity College CT 2026 NY Cornell University 2026 
+Tufts University MA 2024 NY D’Youville University 2024 
+Tulane University LA 2026 NY Farmingdale State College 2026 
+Universidad del Sagrado Corazón 
+
+## Puerto Rico
+
+2026 NY Molloy University 2026 
+University of Alaska Anchorage AK 2026 NY Nazareth University 2026 
+University of California, Davis CA 2026 NY New York University 2026 
+University of California, Los Angeles CA 2026 NY Pace University 2026 
+University of California, Merced CA 2026 NY Siena University 2024 
+University of California, Riverside CA 2024 NY St. John Fisher University 2026 
+University of Central Arkansas AR 2026 NY State University of New York at Binghamton 2026 
+University of Central Florida FL 2024 NY SUNY Buffalo State University 2026 
+University of Colorado Boulder CO 2026 NY University of Rochester 2026 
+University of Connecticut CT 2024 OH John Carroll University 2026 
+University of Dayton OH 2026 OH Ohio University 2026 
+University of Delaware DE 2026 OH Owens Community College 2026 
+University of Denver CO 2024 OH The Ohio State University 2026 
+University of Florida FL 2026 OH The University of Akron 2026 
+University of Georgia GA 2026 OH University of Dayton 2026 
+University of Hawaiʻi at Mānoa HI 2026 OH Xavier University 2026 
+University of Houston TX 2026 OH Youngstown State University 2026 
+University of Houston–Downtown TX 2026 OR Oregon State University 2026 
+University of Illinois Urbana-Champaign IL 2026 OR Portland Community College 2026 
+University of Indianapolis IN 2026 OR Portland State University 2024 
+University of Iowa IA 2026 PA Alvernia University 2026 
+University of Kentucky KY 2026 PA Bucknell University 2026 
+University of Louisiana at Lafayette LA 2026 PA Community College of Philadelphia 2026 
+University of Louisville KY 2026 PA Drexel University 2026 
+University of Maryland Eastern Shore MD 2026 PA Duquesne University 2024 
+University of Maryland, Baltimore MD 2026 PA Elizabethtown College 2026 
+University of Maryland, Baltimore County MD 2026 PA Gettysburg College 2026 
+University of Maryland, College Park MD 2026 PA Juniata College 2026 
+University of Massachusetts Amherst MA 2026 PA La Salle University 2026 
+University of Massachusetts Chan Medical School MA 2026 PA Mercyhurst University 2026 
+University of Massachusetts Dartmouth MA 2026 PA Muhlenberg College 2026 
+University of Massachusetts Lowell MA 2026 PA Saint Joseph’s University 2026 
+University of Miami FL 2026 PA Slippery Rock University of Pennsylvania 2026 
+University of Michigan–Dearborn MI 2026 PA Swarthmore College 2026 
+University of Minnesota Crookston MN 2024 PA The Pennsylvania State University 2026 
+University of Minnesota Duluth MN 2024 PA The University of Scranton 2026 
+University of Minnesota Morris MN 2026 PA University of Pennsylvania 2026 
+University of Minnesota Rochester MN 2024 PA University of Pittsburgh 2026 
+University of Minnesota Twin Cities MN 2026 PA West Chester University of Pennsylvania 2026 
+University of Mississippi MS 2026 PA Widener University 2026 
+University of Missouri–St. Louis MO 2026 
+
+## Puerto Rico
+
+Universidad del Sagrado Corazón 2026 
+University of Montana MT 2026 RI Brown University 2026 
+University of Nebraska at Omaha NE 2026 RI Roger Williams University 2026 
+University of Nebraska Medical Center NE 2026 SC Clemson University 2026 
+University of Nebraska–Lincoln NE 2024 SC Coastal Carolina University 2026 
+University of Nevada, Las Vegas NV 2026 SC The Citadel, The Military College of South Carolina 2026 
+University of Nevada, Reno NV 2026 SC University of South Carolina 2026 
+University of New Hampshire NH 2024 TN Belmont University 2024 
+University of North Carolina at Charlotte NC 2026 TN East Tennessee State University 2026 
+University of North Carolina at Greensboro NC 2024 TN Maryville College 2026 
+University of North Carolina at Pembroke NC 2024 TN Rhodes College 2026 
+University of North Carolina Wilmington NC 2026 TN University of Tennessee at Chattanooga 2026 
+University of North Florida FL 2026 TN University of Tennessee, Knoxville 2026 
+University of Northern Iowa IA 2026 TN Vanderbilt University 2026 
+University of Pennsylvania PA 2026 TX Sam Houston State University 2026 
+University of Pittsburgh PA 2026 TX Southern Methodist University 2026 
+University of Richmond VA 2026 TX Tarleton State University 2026 
+University of Rochester NY 2026 TX Texas Southern University 2026 
+University of San Diego CA 2026 TX The University of Texas at Arlington 2026 
+University of South Carolina SC 2026 TX The University of Texas at El Paso 2026 
+University of South Florida FL 2026 TX The University of Texas at San Antonio 2026 
+University of Southern Indiana IN 2026 TX The University of Texas Rio Grande Valley 2026 
+University of Tennessee at Chattanooga TN 2026 TX University of Houston 2026 
+University of Tennessee, Knoxville TN 2026 TX University of Houston–Downtown 2026 
+University of the Pacific CA 2026 UT The University of Utah 2026 
+University of Virginia VA 2026 UT Utah State University 2026 
+University of Washington WA 2026 UT Utah Valley University 2026 
+University of Washington Bothell WA 2026 UT Weber State University 2026 
+University of Washington Tacoma WA 2026 VA James Madison University 2026 
+University of West Florida FL 2024 VA Old Dominion University 2026 
+University of Wisconsin–Eau Claire WI 2026 VA University of Richmond 2026 
+University of Wisconsin–Green Bay WI 2024 VA University of Virginia 2026 
+University of Wisconsin–Madison WI 2026 VA Virginia Commonwealth University 2026 
+University of Wisconsin–Milwaukee WI 2026 VA Virginia Polytechnic Institute and State University 2026 
+University of Wisconsin–Parkside WI 2026 VA Virginia Wesleyan University 2026 
+University of Wisconsin–Superior WI 2026 VA Washington and Lee University 2024 
+University of Wisconsin–Whitewater WI 2026 VT Middlebury College 2026 
+University of Wyoming WY 2024 WA Gonzaga University 2026 
+Utah State University UT 2026 WA Seattle University 2026 
+Utah Valley University UT 2026 WA University of Washington 2026 
+Vanderbilt University TN 2026 WA University of Washington Bothell 2026 
+Virginia Commonwealth University VA 2026 WA University of Washington Tacoma 2026 
+Virginia Polytechnic Institute and State University VA 2026 WA Washington State University 2026 
+Virginia Wesleyan University VA 2026 WI Marquette University 2026 
+Washington and Lee University VA 2024 WI Medical College of Wisconsin 2026 
+Washington State University WA 2026 WI University of Wisconsin–Eau Claire 2026 
+Weber State University UT 2026 WI University of Wisconsin–Green Bay 2024 
+West Chester University of Pennsylvania PA 2026 WI University of Wisconsin–Madison 2026 
+West Virginia University WV 2026 WI University of Wisconsin–Milwaukee 2026 
+Widener University PA 2026 WI University of Wisconsin–Parkside 2026 
+Wilbur Wright College IL 2024 WI University of Wisconsin–Superior 2026 
+Worcester State University MA 2024 WI University of Wisconsin–Whitewater 2026 
+

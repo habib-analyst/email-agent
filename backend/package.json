@@ -1,0 +1,29 @@
+{
+  "name": "email-agent-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch-path=./src --watch src/server.js",
+    "smoke": "node scripts/smoke.mjs",
+    "build:usa-catalog": "node scripts/build-usa-catalog.mjs",
+    "test": "node --test test/profileResearch.test.js test/keywordAccuracy.test.js test/directoryScrape.test.js test/interestLine.test.js test/profileUrlResolver.test.js test/facultyTitle.test.js test/pageContent.test.js test/mstFacultyUrl.test.js test/pasteImportParser.test.js test/spreadsheetParser.test.js test/deliveryFailureDedup.test.js && npm run smoke"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.0",
+    "better-sqlite3": "^11.0.0",
+    "cheerio": "^1.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "googleapis": "^144.0.0",
+    "mammoth": "^1.12.0",
+    "multer": "^2.1.1",
+    "node-cron": "^3.0.3",
+    "pdf-parse": "^2.4.5",
+    "puppeteer-core": "^25.1.0",
+    "tesseract.js": "^7.0.0",
+    "xlsx": "^0.18.5"
+  }
+}
