@@ -72,6 +72,7 @@ function seedEmptyWorkspace(connection, email) {
     SET sender_email=?, sender_name=NULL, resume_path=NULL, user_api_keys=NULL
     WHERE id=1
   `).run(email || null);
+  connection.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
 }
 
 export async function activateUserWorkspace(email, { migrateLegacy = false } = {}) {
@@ -109,6 +110,7 @@ export async function activateUserWorkspace(email, { migrateLegacy = false } = {
   activeDbPath = targetPath;
   activeTenantKey = key;
   writeFileSync(ACTIVE_USER_PATH, key, 'utf8');
+  activeDb.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
   activeDb.prepare('UPDATE settings SET sender_email=? WHERE id=1').run(normalized);
   const { registerTenant } = await import('../services/tenantRegistry.js');
   registerTenant({ email: normalized, workspaceKey: key });
@@ -231,6 +233,30 @@ CREATE TABLE IF NOT EXISTS delivery_failures (
   inquiry_summary TEXT,
   inquiry_checked_at DATETIME,
   status TEXT DEFAULT 'open',
+  received_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS outbound_send_state (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  paused_until DATETIME,
+  pause_reason TEXT,
+  last_send_at DATETIME,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS outbound_send_reservations (
+  id INTEGER PRIMARY KEY,
+  mode TEXT,
+  send_after DATETIME NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS outbound_send_incidents (
+  id INTEGER PRIMARY KEY,
+  incident_type TEXT NOT NULL,
+  reason TEXT,
+  source TEXT,
+  message_id TEXT,
   received_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -484,6 +510,7 @@ if (!existing) {
   db.prepare(`INSERT INTO settings (id, resume_path, daily_cap, min_delay_min, max_delay_min, followup_days, auto_send, last_digest_sent)
     VALUES (1, ?, 0, 0, 0, 7, 0, date('now', '-7 days'))`).run(resumePath);
 }
+db.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
 
 // Validate resume exists on every startup
 const settings = db.prepare('SELECT resume_path FROM settings WHERE id=1').get();
@@ -524,6 +551,7 @@ alterTableSilent("ALTER TABLE scheduled_batches ADD COLUMN wave_total INTEGER DE
 alterTableSilent("ALTER TABLE scheduled_batches ADD COLUMN manual_due_notified_at DATETIME");
 alterTableSilent("ALTER TABLE scheduled_batches ADD COLUMN send_attempts INTEGER DEFAULT 0");
 alterTableSilent("ALTER TABLE scheduled_batches ADD COLUMN ready_notice_sent_at DATETIME");
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_incident_message ON outbound_send_incidents(message_id) WHERE message_id IS NOT NULL AND message_id != ''"); } catch {}
 
 // Add instructions columns if missing
 function alterTableAddColumn(column, definition) {

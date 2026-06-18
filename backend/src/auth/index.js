@@ -1,14 +1,17 @@
 import { google } from 'googleapis';
 import { config } from '../config/index.js';
-import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
 import { resolve } from 'path';
 import { encryptJson, decryptJson } from '../utils/secrets.js';
 
-const TOKEN_PATH = resolve(import.meta.dirname, '../../.tokens.json');
+const LEGACY_TOKEN_PATH = resolve(import.meta.dirname, '../../.tokens.json');
+const USER_DATA_DIR = resolve(import.meta.dirname, '../../user-data');
+const ACTIVE_USER_PATH = resolve(USER_DATA_DIR, '.active-user');
 const PROFILE_CACHE_MS = 30 * 60 * 1000;
 let profileCache = null;
 let userInfoUnavailable = false;
 let lastProfileLogKey = '';
+let pendingTokens = null;
 export const SCOPES = [
   'openid',
   'https://www.googleapis.com/auth/userinfo.profile',
@@ -23,30 +26,46 @@ function createOAuth2Client() {
   return new google.auth.OAuth2(config.googleClientId, config.googleClientSecret, config.googleRedirectUri);
 }
 
+function activeTokenPath() {
+  try {
+    const key = readFileSync(ACTIVE_USER_PATH, 'utf8').trim();
+    if (key) return resolve(USER_DATA_DIR, key, '.tokens.json');
+  } catch {}
+  return LEGACY_TOKEN_PATH;
+}
+
 // Serialize concurrent token writes to prevent race conditions on .tokens.json
 let writeLock = false;
 let writeQueue = [];
 
 function drainWriteQueue() {
   while (writeQueue.length > 0 && !writeLock) {
-    const { tokens, resolve: res } = writeQueue.shift();
+    const { tokens, path, resolve: res } = writeQueue.shift();
     writeLock = true;
-    try { writeFileSync(TOKEN_PATH, encryptJson(tokens)); } finally { writeLock = false; }
+    try {
+      mkdirSync(resolve(path, '..'), { recursive: true });
+      writeFileSync(path, encryptJson(tokens));
+    } finally { writeLock = false; }
     res();
   }
 }
 
-function saveTokens(tokens) {
+function saveTokens(tokens, path = activeTokenPath()) {
   if (writeLock) {
-    return new Promise(resolve => { writeQueue.push({ tokens, resolve }); });
+    return new Promise(resolve => { writeQueue.push({ tokens, path, resolve }); });
   }
   writeLock = true;
-  try { writeFileSync(TOKEN_PATH, encryptJson(tokens)); } finally { writeLock = false; drainWriteQueue(); }
+  try {
+    mkdirSync(resolve(path, '..'), { recursive: true });
+    writeFileSync(path, encryptJson(tokens));
+  } finally { writeLock = false; drainWriteQueue(); }
 }
 
 function loadTokens() {
-  if (!existsSync(TOKEN_PATH)) return null;
-  const raw = readFileSync(TOKEN_PATH, 'utf8');
+  if (pendingTokens) return pendingTokens;
+  const path = activeTokenPath();
+  if (!existsSync(path)) return null;
+  const raw = readFileSync(path, 'utf8');
   try {
     return decryptJson(raw);
   } catch {
@@ -175,25 +194,43 @@ export async function fetchGmailProfile({ force = false } = {}) {
 export async function handleCallback(code) {
   const client = createOAuth2Client();
   const { tokens } = await client.getToken(code);
-  saveTokens(tokens);
+  pendingTokens = tokens;
   return tokens;
+}
+
+export function commitPendingTokens() {
+  if (!pendingTokens) return;
+  saveTokens(pendingTokens);
+  pendingTokens = null;
+}
+
+export async function discardPendingTokens() {
+  const tokens = pendingTokens;
+  pendingTokens = null;
+  const token = tokens?.access_token || tokens?.refresh_token;
+  if (!token) return;
+  try {
+    const client = createOAuth2Client();
+    await client.revokeToken(token);
+  } catch {}
 }
 
 export function getAuthedClient() {
   const tokens = loadTokens();
   if (!tokens) return null;
+  const tokenPath = activeTokenPath();
   const client = createOAuth2Client();
   client.setCredentials(tokens);
   client.on('tokens', (newTokens) => {
     const merged = { ...tokens, ...newTokens };
-    saveTokens(merged);
+    saveTokens(merged, tokenPath);
     client.setCredentials(merged);
   });
   return client;
 }
 
 export function isAuthenticated() {
-  if (!existsSync(TOKEN_PATH)) return false;
+  if (!pendingTokens && !existsSync(activeTokenPath())) return false;
   const tokens = loadTokens();
   return !!tokens && !!tokens.refresh_token;
 }
@@ -225,7 +262,7 @@ export async function validateToken() {
       e.message?.includes('400')
     ) {
       console.error('[Auth] Token validation failed — tokens are invalid/revoked:', e.message);
-      try { unlinkSync(TOKEN_PATH); } catch { /* ignore */ }
+      try { unlinkSync(activeTokenPath()); } catch { /* ignore */ }
       return { valid: false, reason: 'invalid' };
     }
     console.warn('[Auth] Token validation error (keeping tokens):', e.message);
@@ -234,7 +271,8 @@ export async function validateToken() {
 }
 
 export async function disconnect() {
-  if (!existsSync(TOKEN_PATH)) return;
+  const tokenPath = activeTokenPath();
+  if (!pendingTokens && !existsSync(tokenPath)) return;
 
   try {
     const tokens = loadTokens();
@@ -247,5 +285,6 @@ export async function disconnect() {
   }
 
   clearProfileCache();
-  unlinkSync(TOKEN_PATH);
+  pendingTokens = null;
+  try { unlinkSync(tokenPath); } catch {}
 }

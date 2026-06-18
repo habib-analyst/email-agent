@@ -4,7 +4,7 @@ import { scrapeFacultyPage } from '../research/index.js';
 import { enrichProfessorFromScrape } from '../research/profileResearch.js';
 import { generateEmail, resetTokenUsage, getTokenUsage } from '../ai/index.js';
 import { sendEmail, isSendLimitError } from '../gmail/index.js';
-import { withRetry } from './utils.js';
+import { getOutboundSendBlock, isOutboundSendBlockedError, toSqliteUtc } from '../gmail/sendControl.js';
 import { formatGreetingLastName, capitalizeWord, lastNameFromEmail, fullNameFromEmail } from '../utils/professor.js';
 import { normalizeInterestLineKeywords } from '../utils/interestLine.js';
 import { getAITargetingHints } from '../learning/index.js';
@@ -123,6 +123,15 @@ export function stopScheduler() {
 }
 
 // ── Crash recovery: resume batches stuck in 'sending' state ──
+export function getRecordedScheduledDraftIds(batchId) {
+  return db.prepare(`
+    SELECT draft_id FROM scheduled_sent_log WHERE batch_id = ?
+    UNION
+    SELECT draft_id FROM sent_email_history
+    WHERE batch_id = ? AND draft_id IS NOT NULL AND source='gmail_send'
+  `).all(batchId, batchId).map(r => r.draft_id);
+}
+
 function resumeCrashedBatches() {
   const crashed = db.prepare(
     "SELECT * FROM scheduled_batches WHERE status = 'sending'"
@@ -131,9 +140,7 @@ function resumeCrashedBatches() {
   for (const batch of crashed) {
     console.log(`[Scheduler] Resuming crashed batch #${batch.id} (sending state)`);
     // Cross-reference sent_log to find already-sent drafts
-    const alreadySent = db.prepare(
-      "SELECT draft_id FROM scheduled_sent_log WHERE batch_id = ?"
-    ).all(batch.id).map(r => r.draft_id);
+    const alreadySent = getRecordedScheduledDraftIds(batch.id);
 
     // Find drafts that were approved but not yet sent (not in sent_log)
     const remaining = db.prepare(`
@@ -315,7 +322,7 @@ export async function sendScheduledBatch(batchId, preloadedDrafts = null) {
     const results = await Promise.allSettled(
       chunk.map(async draft => {
         try {
-          const result = await withRetry(() => sendEmail({
+          const result = await sendEmail({
             professor_id: draft.prof_id,
             subject: draft.subject,
             interest_line: draft.interest_line,
@@ -326,10 +333,10 @@ export async function sendScheduledBatch(batchId, preloadedDrafts = null) {
             stripInterestLine: isBasicBatch,
             scheduledTemplateMode: isBasicBatch ? 'basic_scheduled' : 'scheduled',
             useSubjectKeyword: subjectMode !== 'fixed',
-          }));
+          });
           return { draft, success: true, result };
         } catch (e) {
-          return { draft, success: false, error: e.message };
+          return { draft, success: false, error: e.message, code: e.code };
         }
       })
     );
@@ -373,6 +380,29 @@ export async function sendScheduledBatch(batchId, preloadedDrafts = null) {
           agent_summary: `Scheduled batch #${batchId} sent via Gmail`,
         });
       } else {
+        if (isOutboundSendBlockedError(val)) {
+          const blocked = getOutboundSendBlock();
+          db.prepare("UPDATE scheduled_drafts SET status='approved', error=? WHERE id=?").run(val.error, val.draft.id);
+          db.prepare(`
+            UPDATE scheduled_batches
+            SET status='scheduled', scheduled_at=?, ready_notice_sent_at=NULL
+            WHERE id=?
+          `).run(toSqliteUtc(blocked?.retryAt || new Date(Date.now() + 60 * 60 * 1000)), batchId);
+          eventBus.publish({ type: 'scheduled_sending_paused', mode: 'scheduled', batchId, error: val.error });
+          return { retry: false, paused: true };
+        }
+        if (isSendLimitError({ message: val.error })) {
+          eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', batchId, draftId: val.draft.id, error: val.error });
+          const blocked = getOutboundSendBlock();
+          db.prepare("UPDATE scheduled_drafts SET status='approved', error=? WHERE id=?").run(val.error, val.draft.id);
+          db.prepare(`
+            UPDATE scheduled_batches
+            SET status='scheduled', scheduled_at=?, ready_notice_sent_at=NULL
+            WHERE id=?
+          `).run(toSqliteUtc(blocked?.retryAt || new Date(Date.now() + 24 * 60 * 60 * 1000)), batchId);
+          console.error(`[Scheduler] Send limit reached in batch #${batchId} — batch paused`);
+          return { retry: false, limit: true };
+        }
         failedCount++;
         db.prepare("UPDATE scheduled_drafts SET status='failed', error=? WHERE id=?").run(val.error, val.draft.id);
         ArchiveService.recordOutreach({
@@ -387,18 +417,6 @@ export async function sendScheduledBatch(batchId, preloadedDrafts = null) {
           agent_summary: `Send failed: ${val.error}`,
         });
         eventBus.publish({ type: 'scheduled_draft_failed', mode: 'scheduled', batchId, draftId: val.draft.id, error: val.error });
-        if (isSendLimitError({ message: val.error })) {
-          eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', batchId, draftId: val.draft.id, error: val.error });
-          cancelScheduledWork();
-          stopScheduler();
-          db.prepare(`
-            UPDATE scheduled_batches
-            SET status='scheduled', scheduled_at=datetime('now', '+30 minutes'), ready_notice_sent_at=NULL
-            WHERE id=?
-          `).run(batchId);
-          console.error(`[Scheduler] Send limit reached in batch #${batchId} — stopping scheduled work`);
-          return { retry: false, limit: true };
-        }
       }
     }
 

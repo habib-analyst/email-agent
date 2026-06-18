@@ -8,6 +8,12 @@ import { formatGreetingLastName } from '../utils/professor.js';
 import { normalizeInterestLineKeywords } from '../utils/interestLine.js';
 import { getSenderIdentity } from '../services/senderIdentity.js';
 import { config } from '../config/index.js';
+import {
+  completeOutboundSend,
+  recordSendIncident,
+  releaseOutboundSend,
+  reserveOutboundSend,
+} from './sendControl.js';
 
 let _authRetries = 0;
 const MAX_AUTH_RETRIES = 1;
@@ -141,11 +147,25 @@ export async function sendReplyEmail({ to, subject, html, attachmentPath }) {
     console.log(`[Gmail:DryRun] Would send reply to ${to}: ${subject}`);
     return { id: `dry-run-reply-${Date.now()}`, dryRun: true, rawSize: raw.length };
   }
+  const reservation = await reserveOutboundSend({ mode: 'reply' });
   for (let authAttempt = 0; authAttempt <= MAX_AUTH_RETRIES; authAttempt++) {
     try {
       const gmail = getGmail(authAttempt > 0);
       const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
       _authRetries = 0;
+      try {
+        recordSentEmail({
+          professor_email: to,
+          subject,
+          message_id: res.data?.id || null,
+          mode: 'reply',
+          source: 'gmail_reply',
+        });
+        completeOutboundSend(reservation.id);
+      } catch (persistError) {
+        console.error('[Gmail:Reply] Sent successfully but local history update failed:', persistError.message);
+        try { releaseOutboundSend(reservation.id); } catch {}
+      }
       return res.data;
     } catch (e) {
       if (isAuthError(e) && authAttempt < MAX_AUTH_RETRIES) {
@@ -153,6 +173,8 @@ export async function sendReplyEmail({ to, subject, html, attachmentPath }) {
         clearGmailCache();
         continue;
       }
+      releaseOutboundSend(reservation.id);
+      if (isSendLimitError(e)) recordSendIncident({ type: 'send_limit', reason: e.message, source: 'gmail_api' });
       throw e;
     }
   }
@@ -245,25 +267,32 @@ export async function sendEmail(item) {
     return result;
   }
 
+  const reservation = await reserveOutboundSend({ mode: itemMode });
   // Try sending with auth refresh on auth errors
   for (let authAttempt = 0; authAttempt <= MAX_AUTH_RETRIES; authAttempt++) {
     try {
       const gmail = getGmail(authAttempt > 0);
       const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
       _authRetries = 0;
-      recordSentEmail({
-        professor_email: prof.email,
-        last_name: prof.last_name,
-        university: prof.university,
-        subject: item.subject,
-        message_id: res.data?.id || null,
-        mode: itemMode,
-        source: 'gmail_send',
-        professor_id: item.professor_id,
-        queue_id: item.id,
-        batch_id: item.batch_id,
-        draft_id: item.draft_id,
-      });
+      try {
+        recordSentEmail({
+          professor_email: prof.email,
+          last_name: prof.last_name,
+          university: prof.university,
+          subject: item.subject,
+          message_id: res.data?.id || null,
+          mode: itemMode,
+          source: 'gmail_send',
+          professor_id: item.professor_id,
+          queue_id: item.id,
+          batch_id: item.batch_id,
+          draft_id: item.draft_id,
+        });
+        completeOutboundSend(reservation.id);
+      } catch (persistError) {
+        console.error('[Gmail] Sent successfully but local history update failed:', persistError.message);
+        try { releaseOutboundSend(reservation.id); } catch {}
+      }
       return res.data;
     } catch (e) {
       if (isAuthError(e) && authAttempt < MAX_AUTH_RETRIES) {
@@ -271,6 +300,8 @@ export async function sendEmail(item) {
         clearGmailCache();
         continue;
       }
+      releaseOutboundSend(reservation.id);
+      if (isSendLimitError(e)) recordSendIncident({ type: 'send_limit', reason: e.message, source: 'gmail_api' });
       throw e;
     }
   }

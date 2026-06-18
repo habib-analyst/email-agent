@@ -5,6 +5,8 @@ import {
   getAuthedClient,
   isAuthenticated,
   validateToken,
+  commitPendingTokens,
+  discardPendingTokens,
   disconnect as oauthDisconnect,
 } from '../auth/index.js';
 import { eventBus } from '../core/EventBus.js';
@@ -189,16 +191,26 @@ export const AuthService = {
 
   async connectWithCode(code) {
     const previousEmail = getSenderIdentity().email;
-    await oauthHandleCallback(code);
-    clearGmailCache();
-    clearValidateCache();
+    let profile;
+    try {
+      await oauthHandleCallback(code);
+      clearGmailCache();
+      clearValidateCache();
 
-    const profile = await fetchGmailProfile({ force: true });
-    if (!profile?.email) {
-      throw new Error('Connected to Gmail but could not read your email address');
+      profile = await fetchGmailProfile({ force: true });
+      if (!profile?.email) {
+        throw new Error('Connected to Gmail but could not read your email address');
+      }
+      if (previousEmail && previousEmail.toLowerCase() !== profile.email.toLowerCase()) {
+        throw new Error(`Disconnect ${previousEmail} before connecting ${profile.email}`);
+      }
+    } catch (error) {
+      await discardPendingTokens();
+      throw error;
     }
 
     const workspaceSwitched = await switchWorkspace(profile.email);
+    commitPendingTokens();
     const existing = getSenderIdentity();
     const sender = setConnectedSender(
       profile.email,

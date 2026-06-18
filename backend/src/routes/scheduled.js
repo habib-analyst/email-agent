@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import db from '../db/index.js';
 import { eventBus } from '../core/EventBus.js';
-import { enqueueBatch, sendScheduledBatch, cancelScheduledWork, stopScheduler, clearScheduledAbort } from '../pipeline/scheduler.js';
+import { enqueueBatch, sendScheduledBatch, clearScheduledAbort } from '../pipeline/scheduler.js';
 import { getScheduledBatchAgentContext } from '../db/scheduledAgentContext.js';
 import { verifyScheduledBatchBeforeSend, verifyScheduledDraft } from '../pipeline/scheduledVerify.js';
 import { filterDuplicateEmails, recordDuplicateBlocked } from '../db/duplicateCheck.js';
@@ -484,8 +484,6 @@ router.post('/draft/:id/send-now', requireGmailValidated, async (req, res) => {
     const reason = e?.errors?.[0]?.reason || e?.response?.data?.error?.status || e?.code || e?.status || 'unknown';
     if (isSendLimitError(e)) {
       eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', error: e.message });
-      cancelScheduledWork();
-      stopScheduler();
     }
     const failedDraft = db.prepare(`
       SELECT d.*, sp.email as professor_email
@@ -494,16 +492,20 @@ router.post('/draft/:id/send-now', requireGmailValidated, async (req, res) => {
       WHERE d.id=?
     `).get(req.params.id);
     if (failedDraft) {
-      db.prepare("UPDATE scheduled_drafts SET status='failed', error=? WHERE id=?").run(detail, failedDraft.id);
-      recordDeliveryFailure({
-        professor_email: failedDraft.professor_email,
-        failure_type: isSendLimitError(e) ? 'send_limit' : 'delivery_failed',
-        reason: detail,
-        source: 'gmail_api',
-        mode: 'scheduled',
-        batch_id: failedDraft.batch_id,
-        draft_id: failedDraft.id,
-      });
+      if (isSendLimitError(e)) {
+        db.prepare("UPDATE scheduled_drafts SET status='approved', error=? WHERE id=?").run(detail, failedDraft.id);
+      } else {
+        db.prepare("UPDATE scheduled_drafts SET status='failed', error=? WHERE id=?").run(detail, failedDraft.id);
+        recordDeliveryFailure({
+          professor_email: failedDraft.professor_email,
+          failure_type: 'delivery_failed',
+          reason: detail,
+          source: 'gmail_api',
+          mode: 'scheduled',
+          batch_id: failedDraft.batch_id,
+          draft_id: failedDraft.id,
+        });
+      }
     }
     console.error(`[Scheduled] Manual send failed for draft #${req.params.id}: ${detail} (${reason})`);
     res.status(500).json({ error: e.message || 'Send failed' });

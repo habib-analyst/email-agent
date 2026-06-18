@@ -1327,9 +1327,6 @@ router.post('/delivery-failures/:id/send', requireGmail, async (req, res) => {
     res.json({ success: true, sent: 1, result });
   } catch (e) {
     if (isSendLimitError(e)) {
-      cancelScheduledWork();
-      stopScheduler();
-      recordDeliveryFailure({ professor_email: row?.professor_email, failure_type: 'send_limit', reason: e.message, source: 'gmail_api', mode: 'scheduled', draft_id: row?.draft_id, batch_id: row?.batch_id });
       eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', error: e.message });
     }
     res.status(500).json({ error: e.message || 'Send failed' });
@@ -1355,8 +1352,6 @@ router.post('/delivery-failures/send-all', requireGmail, async (req, res) => {
     } catch (e) {
       failed.push({ id: row.id, email: row.professor_email, error: e.message });
       if (isSendLimitError(e)) {
-        cancelScheduledWork();
-        stopScheduler();
         eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', error: e.message });
         break;
       }

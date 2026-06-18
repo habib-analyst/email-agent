@@ -5,7 +5,8 @@ import { ArchiveService } from '../services/ArchiveService.js';
 import { basicLastNameResearch, hasBasicLastName } from '../research/basicLastNameResearch.js';
 import { generateEmail, verifyDraft, extractAccurateKeywords, keywordsFromProfileOnly, isGenericKeyword } from '../ai/index.js';
 import { sendEmail, isSendLimitError } from '../gmail/index.js';
-import { withRetry, delay, randomDelay } from './utils.js';
+import { getOutboundSendBlock, isOutboundSendBlockedError, toSqliteUtc } from '../gmail/sendControl.js';
+import { withRetry, delay } from './utils.js';
 import { getAITargetingHints } from '../learning/index.js';
 import { getSessionEpoch, isSessionEpoch } from '../session/epoch.js';
 import { eventBus } from '../core/EventBus.js';
@@ -45,6 +46,7 @@ export function getWorkerStatus() {
     activeWorkers,
     lastActivity,
     queueWorkers: Number(settings?.queue_workers) || 2,
+    sendingBlock: getOutboundSendBlock(),
   };
 }
 export { eventBus };
@@ -161,14 +163,7 @@ function buildPreviewHtml(rawHtml, lastName, interestLine, stripInterest) {
 }
 
 function getNext() {
-  const settings = getSettings();
-  if (settings.daily_cap > 0) {
-    // Use local timezone for daily cap — SQLite date('now') is UTC
-    const now = new Date();
-    const todayLocal = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-    const todaySent = db.prepare("SELECT COUNT(*) as c FROM sent_log WHERE date(sent_at)=?").get(todayLocal).c;
-    if (todaySent >= settings.daily_cap) return null;
-  }
+  if (getOutboundSendBlock()) return null;
 
   const baseSql = `
     SELECT q.*, p.email as prof_email, p.last_name as prof_last_name, p.source_url
@@ -318,14 +313,14 @@ async function sendFastTrackedDraft(item, prof, tplRow, loopEpoch) {
   publishStep('sending', item);
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sending');
   try {
-    const sendResult = await withRetry(() => sendEmail({
+    const sendResult = await sendEmail({
       ...item,
       professor_id: prof.id,
       subject,
       interest_line: interestLine,
       stripInterestLine: isBasicInstant,
       mode: itemMode,
-    }));
+    });
     if (!isSessionEpoch(db, loopEpoch)) return true;
 
     updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
@@ -523,14 +518,14 @@ async function processBasicInstantItem(item, prof, tplRow, loopEpoch) {
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, '', previewHtml, 'sending');
-  const sendResult = await withRetry(() => sendEmail({
+  const sendResult = await sendEmail({
     ...item,
     professor_id: prof.id,
     subject,
     interest_line: '',
     stripInterestLine: true,
     mode: itemMode,
-  }));
+  });
   if (!isSessionEpoch(db, loopEpoch)) return;
 
   updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
@@ -634,13 +629,13 @@ async function draftFromRosterKeywords(item, prof, tplRow, loopEpoch, storedDoss
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sending');
-  const sendResult = await withRetry(() => sendEmail({
+  const sendResult = await sendEmail({
     ...item,
     professor_id: prof.id,
     subject,
     interest_line: interestLine,
     mode: itemMode,
-  }));
+  });
   if (!isSessionEpoch(db, loopEpoch)) return;
 
   updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
@@ -719,14 +714,14 @@ async function processRosterSheetItem(item, prof, tplRow, loopEpoch, storedDossi
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, '', previewHtml, 'sending');
-  const sendResult = await withRetry(() => sendEmail({
+  const sendResult = await sendEmail({
     ...item,
     professor_id: prof.id,
     subject,
     interest_line: '',
     stripInterestLine: true,
     mode: itemMode,
-  }));
+  });
   if (!isSessionEpoch(db, loopEpoch)) return;
 
   updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
@@ -756,7 +751,7 @@ async function processQueueItem(item, loopEpoch) {
     }
     publishStep('sending', item);
     try {
-      const sendResult = await withRetry(() => sendEmail({ ...item, professor_id: prof.id }));
+      const sendResult = await sendEmail({ ...item, professor_id: prof.id });
       updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
       db.prepare('UPDATE queue SET fast_track=0 WHERE id=?').run(item.id);
       db.prepare("INSERT INTO sent_log (professor_email, subject, topic, message_id, sent_at, mode) VALUES (?,?,?,?,datetime('now'),?)")
@@ -1057,7 +1052,7 @@ async function processQueueItem(item, loopEpoch) {
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sending');
-  const sendResult = await withRetry(() => sendEmail({ ...item, professor_id: prof.id, subject, interest_line: interestLine }));
+  const sendResult = await sendEmail({ ...item, professor_id: prof.id, subject, interest_line: interestLine });
   if (!isSessionEpoch(db, loopEpoch)) return;
 
   updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
@@ -1133,7 +1128,25 @@ export async function runWorker() {
       try {
         await processQueueItem(item, loopEpoch);
       } catch (e) {
-        if (isSendLimitError(e)) {
+        const confirmedSent = db.prepare(`
+          SELECT message_id, sent_at FROM sent_email_history
+          WHERE queue_id=? AND source='gmail_send'
+          ORDER BY id DESC LIMIT 1
+        `).get(item.id);
+        const currentState = db.prepare('SELECT state, sent_at FROM queue WHERE id=?').get(item.id);
+        if (confirmedSent || currentState?.state === 'sent') {
+          updateState(item.id, 'sent', {
+            sent_at: confirmedSent?.sent_at || currentState?.sent_at,
+            messageId: confirmedSent?.message_id,
+            warning: e.message,
+          });
+          console.error(`[Worker] Post-send processing failed for queue #${item.id}; Gmail send was preserved:`, e.message);
+        } else if (isOutboundSendBlockedError(e)) {
+          const blocked = getOutboundSendBlock();
+          db.prepare("UPDATE queue SET state='pending', error=?, retry_after=? WHERE id=?")
+            .run(e.message, toSqliteUtc(e.pausedUntil || blocked?.retryAt), item.id);
+          eventBus.publish({ type: 'sending_paused', id: item.id, mode: item.mode || 'instant', error: e.message });
+        } else if (isSendLimitError(e)) {
           updateState(item.id, 'failed', { error: e.message });
           eventBus.publish({ type: 'send_limit_reached', id: item.id, mode: item.mode || 'instant', error: e.message });
           console.error(`[Worker] Gmail send limit: ${e.message}`);

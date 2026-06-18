@@ -4,16 +4,20 @@ import { classifyReply } from '../ai/index.js';
 import db from '../db/index.js';
 import { withRetry } from '../pipeline/utils.js';
 import { recordDeliveryFailure } from '../db/deliveryFailures.js';
-import { cancelScheduledWork, stopScheduler } from '../pipeline/scheduler.js';
 import { eventBus } from '../core/EventBus.js';
+import { recordSendIncident, toSqliteUtc } from './sendControl.js';
 
 const SELF_EMAILS = new Set(['mailer-daemon@googlemail.com', 'mail delivery subsystem', 'postmaster']);
 
 export function hasProcessedDeliveryFailure(messageId) {
   if (!messageId) return false;
-  return Boolean(db.prepare(
+  const deliveryFailure = db.prepare(
     'SELECT 1 FROM delivery_failures WHERE message_id=? LIMIT 1'
-  ).get(messageId));
+  ).get(messageId);
+  const sendIncident = db.prepare(
+    'SELECT 1 FROM outbound_send_incidents WHERE message_id=? LIMIT 1'
+  ).get(messageId);
+  return Boolean(deliveryFailure || sendIncident);
 }
 
 export async function classifyReplies({ maxResults = 100, windowDays: forcedWindowDays } = {}) {
@@ -55,6 +59,33 @@ export async function classifyReplies({ maxResults = 100, windowDays: forcedWind
         continue;
       }
 
+      if (bounce.type === 'send_limit') {
+        const incident = recordSendIncident({
+          type: 'send_limit',
+          reason: bounce.reason,
+          source: 'gmail_bounce',
+          messageId: full.data.id,
+        });
+        if (incident.added) {
+          result.failures += 1;
+          db.prepare(`
+            UPDATE scheduled_batches
+            SET status=CASE WHEN auto_approve=1 THEN 'scheduled' ELSE 'drafted' END,
+                scheduled_at=?,
+                ready_notice_sent_at=NULL
+            WHERE status IN ('pending','processing','drafted','scheduled','sending')
+          `).run(toSqliteUtc(incident.pausedUntil));
+          eventBus.publish({
+            type: 'scheduled_send_limit_reached',
+            mode: 'scheduled',
+            error: bounce.reason,
+            pausedUntil: incident.pausedUntil,
+          });
+        }
+        await labelDeliveryFailureMessage(gmail, full.data.id, bounce.type).catch(() => {});
+        continue;
+      }
+
       const recipients = extractFailureRecipients(body, sentEmails);
       const targets = recipients.length ? recipients : inferLatestSentTargets(sentEmails, bounce.type);
       let addedNewFailure = false;
@@ -77,18 +108,6 @@ export async function classifyReplies({ maxResults = 100, windowDays: forcedWind
           raw_excerpt: body.slice(0, 1000),
         });
         if (email && !existing) addedNewFailure = true;
-      }
-      if (bounce.type === 'send_limit' && addedNewFailure) {
-        cancelScheduledWork();
-        db.prepare(`
-          UPDATE scheduled_batches
-          SET status=CASE WHEN auto_approve=1 THEN 'scheduled' ELSE 'drafted' END,
-              scheduled_at=datetime('now', '+30 minutes'),
-              ready_notice_sent_at=NULL
-          WHERE status IN ('pending','processing','drafted','scheduled','sending')
-        `).run();
-        stopScheduler();
-        eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', error: bounce.reason });
       }
       if (addedNewFailure) result.failures += 1;
       await labelDeliveryFailureMessage(gmail, full.data.id, bounce.type).catch(() => {});
@@ -184,15 +203,8 @@ function extractFailureRecipients(body, sentEmails) {
   return emails.map(email => sentByEmail.get(email) || { email, mode: 'scheduled' });
 }
 
-function inferLatestSentTargets(sentEmails, type) {
-  if (type !== 'send_limit') return [];
-  const row = db.prepare(`
-    SELECT professor_email, mode, batch_id, draft_id, queue_id
-    FROM sent_email_history
-    ORDER BY sent_at DESC, id DESC
-    LIMIT 1
-  `).get();
-  return row ? [row] : [];
+function inferLatestSentTargets() {
+  return [];
 }
 
 function extractBody(payload) {

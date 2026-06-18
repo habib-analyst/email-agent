@@ -71,7 +71,9 @@ export function getDeliveryFailureStats(mode) {
   const modeClause = mode ? 'WHERE mode=?' : '';
   const params = mode ? [mode] : [];
   const total = db.prepare(`SELECT COUNT(*) as c FROM delivery_failures ${modeClause}`).get(...params).c;
-  const limitReached = db.prepare(`SELECT COUNT(*) as c FROM delivery_failures ${modeClause ? `${modeClause} AND` : 'WHERE'} failure_type='send_limit'`).get(...params).c;
+  const recipientLimitRows = db.prepare(`SELECT COUNT(*) as c FROM delivery_failures ${modeClause ? `${modeClause} AND` : 'WHERE'} failure_type='send_limit'`).get(...params).c;
+  const accountLimitIncidents = db.prepare("SELECT COUNT(*) as c FROM outbound_send_incidents WHERE incident_type='send_limit'").get().c;
+  const limitReached = recipientLimitRows + accountLimitIncidents;
   const notFound = db.prepare(`SELECT COUNT(*) as c FROM delivery_failures ${modeClause ? `${modeClause} AND` : 'WHERE'} failure_type='not_found'`).get(...params).c;
   const recent = db.prepare(`SELECT COUNT(*) as c FROM delivery_failures ${modeClause ? `${modeClause} AND` : 'WHERE'} received_at >= datetime('now', '-24 hours')`).get(...params).c;
   return { deliveryFailed: total, sendLimitFailures: limitReached, notFoundFailures: notFound, recentDeliveryFailures: recent };
