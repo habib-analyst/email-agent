@@ -1247,3 +1247,33 @@ JSON:{"suggested_reply_html":"<p>...</p>","reply_subject":"Re: Original Subject"
     reply_subject: replySubject,
   };
 }
+
+export async function suggestFollowUp({ last_name, original_subject, original_email_html, days_since, stage = 1, style_samples = [] }) {
+  const styleGuide = Array.isArray(style_samples) && style_samples.length
+    ? `\nWRITING STYLE — mirror the tone, length, vocabulary, greeting, and sign-off of these replies the sender actually wrote to professors. Match their voice; do NOT copy their content:\n${style_samples.map((sample, index) => `Past reply ${index + 1}:\n${sample}`).join('\n\n')}\n`
+    : '';
+
+  const prompt = `You are writing a brief follow-up email from a student seeking MS/PhD positions. The professor has NOT replied to the original email below, sent about ${days_since || 'a few'} days ago. This is follow-up #${stage}.
+
+ORIGINAL EMAIL ALREADY SENT (HTML):
+${original_email_html || 'Not provided'}
+${styleGuide}
+RULES:
+1. Very short — 2-3 sentences maximum. A polite nudge, not a re-pitch.
+2. Politely reference the earlier email and gently ask if they had a chance to consider it.
+3. Never sound demanding, impatient, or guilt-tripping. Be warm and respectful.
+4. Do NOT repeat the full original pitch or restate research interests at length.
+5. Format as clean HTML for Gmail compose (simple <p> tags, no CSS, no colors, no images).
+6. Address the professor as "Dear Professor ${last_name || '[Last Name]'}," if a last name is available.
+7. Sign off with just the first name (no full signature block).
+8. Subject must be "Re: " followed by the original subject (strip any existing "Re:" prefix first).
+
+JSON:{"follow_up_html":"<p>...</p>","subject":"Re: Original Subject"}`;
+
+  const result = await callAI(prompt, 'heavy');
+  const baseSubject = original_subject ? original_subject.replace(/^Re:\s*/i, '') : 'Your Email';
+  return {
+    follow_up_html: result.follow_up_html || '',
+    subject: result.subject || `Re: ${baseSubject}`,
+  };
+}
