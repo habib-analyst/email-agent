@@ -34,6 +34,7 @@ import useAutoClearAfterBatch from '../hooks/useAutoClearAfterBatch.js';
 import useOperationalSummary from '../hooks/useOperationalSummary.js';
 import DeliveryFailuresPanel from '../components/DeliveryFailuresPanel.jsx';
 import FollowUpsPanel from '../components/FollowUpsPanel.jsx';
+import EngagementPanel from '../components/EngagementPanel.jsx';
 import { useSettingsModal } from '../context/SettingsModalContext.jsx';
 import WorkflowDeck, { WorkflowSlide } from '../components/layout/WorkflowDeck.jsx';
 import CombinedLiveSection from '../components/layout/CombinedLiveSection.jsx';
@@ -1778,6 +1779,12 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       <WorkflowSlide id="follow-ups" title="Follow-ups" icon={Clock}>
         <StepCard step={9} title="Follow-ups" subtitle="Nudge professors who never replied · drafts you review and send manually" icon={Clock} owner="user">
           <FollowUpsPanel />
+        </StepCard>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="engagement" title="Engagement" icon={Activity}>
+        <StepCard step={10} title="Engagement" subtitle="Open, click, and reply rates across your outreach" icon={Activity} owner="user">
+          <EngagementPanel />
         </StepCard>
       </WorkflowSlide>
       </WorkflowDeck>

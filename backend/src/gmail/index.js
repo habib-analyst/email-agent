@@ -9,6 +9,7 @@ import { normalizeInterestLineKeywords } from '../utils/interestLine.js';
 import { getSenderIdentity, requireSenderIdentity } from '../services/senderIdentity.js';
 import { config } from '../config/index.js';
 import { eventBus } from '../core/EventBus.js';
+import { createTrackingRecord, injectTracking, attachMessageId } from '../tracking/index.js';
 import {
   completeOutboundSend,
   DuplicateSendError,
@@ -324,6 +325,21 @@ export async function sendEmail(item) {
   }
   const email = sender?.email || config.senderEmail || 'dry-run@example.local';
   const name = sender?.name || config.senderName || 'Dry Run Sender';
+  let trackingToken = null;
+  if (config.trackingEnabled && !config.dryRunSend) {
+    try {
+      trackingToken = createTrackingRecord({
+        professor_email: prof.email,
+        subject: item.subject,
+        mode: itemMode,
+        batch_id: item.batch_id,
+      });
+      html = injectTracking(html, trackingToken);
+    } catch (trackingError) {
+      console.error('[Gmail] Tracking injection failed (sending without tracking):', trackingError.message);
+      trackingToken = null;
+    }
+  }
   const raw = buildMime(email, name, prof.email, item.subject, html, settings.resume_path);
   if (config.dryRunSend) {
     console.log(`[Gmail:DryRun] Would send ${itemMode} email to ${prof.email}: ${item.subject}`);
@@ -371,6 +387,9 @@ export async function sendEmail(item) {
           draft_id: item.draft_id,
         });
         publishSentHistoryUpdated({ email: prof.email, mode: itemMode, messageId: res.data?.id });
+        if (trackingToken) {
+          try { attachMessageId(trackingToken, res.data?.id || null); } catch {}
+        }
         completeOutboundSend(reservation.id);
       } catch (persistError) {
         console.error('[Gmail] Sent successfully but local history update failed:', persistError.message);
