@@ -70,6 +70,8 @@ function ensureTenantRuntimeSchema(connection) {
       ON outbound_send_incidents(message_id)
       WHERE message_id IS NOT NULL AND message_id != '';
   `);
+  const queueExists = connection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue'").get();
+  if (queueExists) {
   try { connection.exec("ALTER TABLE queue ADD COLUMN auto_send_requested INTEGER"); } catch {}
   try { connection.exec("ALTER TABLE queue ADD COLUMN queue_group_id INTEGER"); } catch {}
   try { connection.exec("CREATE INDEX IF NOT EXISTS idx_queue_group ON queue(queue_group_id)"); } catch {}
@@ -90,6 +92,7 @@ function ensureTenantRuntimeSchema(connection) {
       ), created_at)
       WHERE mode=? AND source='legacy_migration'
     `).run(mode);
+  }
   }
   connection.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
 }

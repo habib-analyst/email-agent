@@ -1201,13 +1201,17 @@ export async function generateEmail(dossier, instructions, sampleSubject, target
   };
 }
 
-export async function suggestReply({ professor_email, original_subject, reply_classification, reply_summary, original_email_html }) {
+export async function suggestReply({ professor_email, original_subject, reply_classification, reply_summary, original_email_html, style_samples = [] }) {
   const toneGuide = {
     positive: 'Write an enthusiastic, grateful acceptance. Express sincere excitement about the opportunity and appreciation for the professor\'s willingness to connect.',
     negative: 'Write a polite, respectful decline. Thank the professor for their time and consideration. Keep it gracious and professional.',
     neutral: 'Write a concise, professional informational reply. Acknowledge the professor\'s response and address any points raised. Keep it brief and clear.',
   };
   const tone = toneGuide[reply_classification] || toneGuide.neutral;
+
+  const styleGuide = Array.isArray(style_samples) && style_samples.length
+    ? `\nWRITING STYLE — mirror the tone, length, vocabulary, greeting, and sign-off of these replies the sender actually wrote to professors. Match their voice; do NOT copy their content:\n${style_samples.map((sample, index) => `Past reply ${index + 1}:\n${sample}`).join('\n\n')}\n`
+    : '';
 
   const prompt = `You are writing a reply email from a student seeking MS/PhD positions.
 
@@ -1218,7 +1222,7 @@ CLASSIFICATION: ${reply_classification}
 SUMMARY OF PROFESSOR\'S REPLY: ${reply_summary}
 
 TONE: ${tone}
-
+${styleGuide}
 RULES:
 1. Reply must be SHORT — 3-5 sentences maximum, never more than 6 sentences
 2. Professional and personalized — reference specific points from the professor\'s reply summary
