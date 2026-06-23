@@ -33,6 +33,7 @@ import { formatTime12 } from '../utils/dateTime.js';
 import useAutoClearAfterBatch from '../hooks/useAutoClearAfterBatch.js';
 import useOperationalSummary from '../hooks/useOperationalSummary.js';
 import DeliveryFailuresPanel from '../components/DeliveryFailuresPanel.jsx';
+import FollowUpsPanel from '../components/FollowUpsPanel.jsx';
 import { useSettingsModal } from '../context/SettingsModalContext.jsx';
 import WorkflowDeck, { WorkflowSlide } from '../components/layout/WorkflowDeck.jsx';
 import CombinedLiveSection from '../components/layout/CombinedLiveSection.jsx';
@@ -1772,6 +1773,12 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
           <ReplyAnalyticsSection replies={replies} onRefresh={loadSession} filter={replyFilter} onClearFilter={() => setReplyFilter('all')} openSignal={openSignals.replies} />
         </StepCard>
       </div>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="follow-ups" title="Follow-ups" icon={Clock}>
+        <StepCard step={9} title="Follow-ups" subtitle="Nudge professors who never replied · drafts you review and send manually" icon={Clock} owner="user">
+          <FollowUpsPanel />
+        </StepCard>
       </WorkflowSlide>
       </WorkflowDeck>
     </WorkflowPage>

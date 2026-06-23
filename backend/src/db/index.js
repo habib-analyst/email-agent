@@ -69,6 +69,25 @@ function ensureTenantRuntimeSchema(connection) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_incident_message
       ON outbound_send_incidents(message_id)
       WHERE message_id IS NOT NULL AND message_id != '';
+    CREATE TABLE IF NOT EXISTS follow_ups (
+      id INTEGER PRIMARY KEY,
+      professor_email TEXT NOT NULL,
+      stage INTEGER NOT NULL DEFAULT 1,
+      thread_id TEXT,
+      original_message_id TEXT,
+      original_subject TEXT,
+      last_name TEXT,
+      university TEXT,
+      mode TEXT DEFAULT 'instant',
+      suggested_body TEXT,
+      subject TEXT,
+      workflow_status TEXT DEFAULT 'candidate',
+      sent_at DATETIME,
+      sent_message_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(professor_email, stage)
+    );
   `);
   const queueExists = connection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue'").get();
   if (queueExists) {

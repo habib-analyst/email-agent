@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import db, { getActiveWorkspace } from '../db/index.js';
-import { detectPlaceholders, getTokenUsage, resetTokenUsage, getTotalQwenTokens, getApiStats, suggestReply } from '../ai/index.js';
+import { detectPlaceholders, getTokenUsage, resetTokenUsage, getTotalQwenTokens, getApiStats, suggestReply, suggestFollowUp } from '../ai/index.js';
 import {
   createReplyDraft,
   getEmailHtml,
   getMessageReplyHeaders,
+  getSentEmailSnapshot,
   sendReplyEmail,
   sendEmail,
   isSendLimitError,
@@ -63,6 +64,13 @@ import { professorsFromRawImportInput } from '../utils/pasteImportParser.js';
 import { getDeliveryFailureStats, recordDeliveryFailure } from '../db/deliveryFailures.js';
 import { getOutboundSendBlock } from '../gmail/sendControl.js';
 import { fetchUserReplyStyleSamples } from '../gmail/sentReplyStyle.js';
+import {
+  listFollowUpCandidates,
+  getFollowUpDays,
+  saveFollowUpDraft,
+  markFollowUpSent,
+  markFollowUpSkipped,
+} from '../services/followUpService.js';
 import { getInstantQueueGroupRows, latestInstantQueueGroup, listInstantQueueGroups } from '../services/instantQueueGroups.js';
 
 const router = Router();
@@ -2057,6 +2065,99 @@ router.delete('/replies/:id', (req, res) => {
   db.prepare("UPDATE replies SET workflow_status='rejected', rejected_at=datetime('now') WHERE id=?").run(reply.id);
   eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
   res.json({ success: true, preserved: true });
+});
+
+// --- Follow-ups (non-responder nudges; draft-first, manual send only) ---
+router.get('/follow-ups', (req, res) => {
+  try {
+    const days = req.query.days ? Number(req.query.days) : undefined;
+    const candidates = listFollowUpCandidates({ days });
+    res.json({ days: days || getFollowUpDays(), candidates });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function findFollowUpCandidate(email) {
+  return listFollowUpCandidates({ days: 0 }).find(
+    item => item.professor_email.toLowerCase() === String(email || '').toLowerCase(),
+  );
+}
+
+router.post('/follow-ups/draft', async (req, res) => {
+  try {
+    const email = String(req.body?.professor_email || '').trim();
+    if (!email) return res.status(400).json({ error: 'professor_email is required' });
+    const candidate = findFollowUpCandidate(email);
+    if (!candidate) return res.status(404).json({ error: 'No pending follow-up found for this recipient' });
+
+    let originalHtml = null;
+    let threadId = null;
+    if (candidate.original_message_id) {
+      try {
+        const snapshot = await getSentEmailSnapshot(candidate.original_message_id);
+        originalHtml = snapshot?.html || null;
+        threadId = snapshot?.threadId || null;
+      } catch { /* original lookup is best-effort */ }
+    }
+
+    const result = await suggestFollowUp({
+      last_name: candidate.last_name,
+      original_subject: candidate.original_subject,
+      original_email_html: originalHtml,
+      days_since: candidate.days_since,
+      stage: 1,
+      style_samples: await fetchUserReplyStyleSamples({ maxSamples: 3 }).catch(() => []),
+    });
+
+    saveFollowUpDraft(candidate, { body: result.follow_up_html, subject: result.subject, threadId });
+    eventBus.publish({ type: 'follow_up_updated', professor_email: email });
+    res.json({ success: true, follow_up_html: result.follow_up_html, subject: result.subject });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/follow-ups/send', requireGmail, async (req, res) => {
+  try {
+    const email = String(req.body?.professor_email || '').trim();
+    if (!email) return res.status(400).json({ error: 'professor_email is required' });
+    const candidate = findFollowUpCandidate(email);
+    if (!candidate) return res.status(404).json({ error: 'No pending follow-up found for this recipient' });
+
+    const html = req.body?.html || candidate.suggested_body;
+    if (!html) return res.status(400).json({ error: 'No follow-up content to send — generate or provide a draft first' });
+    const subject = req.body?.subject
+      || candidate.follow_up_subject
+      || `Re: ${String(candidate.original_subject || 'Your Email').replace(/^(?:Re:\s*)+/i, '')}`;
+
+    let threadId = candidate.thread_id || null;
+    let replyHeaders = {};
+    if (candidate.original_message_id) {
+      try {
+        if (!threadId) {
+          const snapshot = await getSentEmailSnapshot(candidate.original_message_id);
+          threadId = snapshot?.threadId || null;
+        }
+        replyHeaders = await getMessageReplyHeaders(candidate.original_message_id);
+      } catch { /* thread linkage is best-effort; falls back to a fresh message */ }
+    }
+
+    const result = await sendReplyEmail({ to: email, subject, html, threadId, replyHeaders });
+    markFollowUpSent(email, { body: html, subject, sentMessageId: result.id });
+    eventBus.publish({ type: 'follow_up_updated', professor_email: email });
+    res.json({ success: true, messageId: result.id });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+router.post('/follow-ups/skip', (req, res) => {
+  const email = String(req.body?.professor_email || '').trim();
+  if (!email) return res.status(400).json({ error: 'professor_email is required' });
+  markFollowUpSkipped(email, findFollowUpCandidate(email) || {});
+  eventBus.publish({ type: 'follow_up_updated', professor_email: email });
+  res.json({ success: true });
 });
 
 router.post('/queue/reconcile', (req, res) => {
