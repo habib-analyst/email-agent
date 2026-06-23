@@ -62,6 +62,7 @@ import { isBasicInstant, isBasicMode } from '../config/modes.js';
 import { professorsFromRawImportInput } from '../utils/pasteImportParser.js';
 import { getDeliveryFailureStats, recordDeliveryFailure } from '../db/deliveryFailures.js';
 import { getOutboundSendBlock } from '../gmail/sendControl.js';
+import { fetchUserReplyStyleSamples } from '../gmail/sentReplyStyle.js';
 import { getInstantQueueGroupRows, latestInstantQueueGroup, listInstantQueueGroups } from '../services/instantQueueGroups.js';
 
 const router = Router();
@@ -1850,6 +1851,7 @@ router.post('/replies/:id/suggest', async (req, res) => {
         reply_classification: reply.classification,
         reply_summary: reply.summary,
         original_email_html: reply.reply_body,
+        style_samples: await fetchUserReplyStyleSamples({ maxSamples: 3 }).catch(() => []),
       });
 
     db.prepare("UPDATE replies SET suggested_reply=?, reply_subject=?, original_subject=?, workflow_status='drafted' WHERE id=?")
