@@ -49,6 +49,11 @@ const baseConfig = {
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
   aiFallbackEnabled: process.env.AI_FALLBACK_ENABLED !== 'false',
   dryRunSend: process.env.DRY_RUN_SEND === 'true',
+  trackingEnabled: process.env.EMAIL_TRACKING_ENABLED !== 'false',
+  publicBackendUrl: (
+    process.env.PUBLIC_BACKEND_URL ||
+    (process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/api/auth/callback').replace(/\/api\/.*$/, '')
+  ).replace(/\/$/, ''),
 };
 
 const tenantOverrides = new Map();

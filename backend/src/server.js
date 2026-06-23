@@ -13,6 +13,7 @@ import { repairBasicInstantTemplate } from './db/templateStore.js';
 import { securityHeaders } from './middleware/security.js';
 import { requireActiveTenant, requireFeature } from './middleware/tenantAccess.js';
 import { tenantSessionContext } from './middleware/tenantSession.js';
+import trackingRouter from './routes/tracking.js';
 import { reconcilePersistedWork } from './services/startupReconciliation.js';
 process.on('uncaughtException', (e) => console.error('[FATAL] Uncaught exception:', e));
 process.on('unhandledRejection', (e) => console.error('[FATAL] Unhandled rejection:', e));
@@ -37,6 +38,7 @@ app.use(cors({
 }));
 app.use(securityHeaders);
 app.use(express.json({ limit: '10mb' }));
+app.use('/api/track', trackingRouter);
 app.use(tenantSessionContext);
 app.use('/api', router);
 app.use('/api/scheduled', requireActiveTenant, requireFeature('scheduled'), scheduledRouter);

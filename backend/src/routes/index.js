@@ -72,6 +72,7 @@ import {
   markFollowUpSkipped,
 } from '../services/followUpService.js';
 import { getInstantQueueGroupRows, latestInstantQueueGroup, listInstantQueueGroups } from '../services/instantQueueGroups.js';
+import { getTrackingSummary } from '../tracking/index.js';
 
 const router = Router();
 const BLOCKED_TEST_DOMAINS = ['example.com', 'example.edu'];
@@ -2158,6 +2159,14 @@ router.post('/follow-ups/skip', (req, res) => {
   markFollowUpSkipped(email, findFollowUpCandidate(email) || {});
   eventBus.publish({ type: 'follow_up_updated', professor_email: email });
   res.json({ success: true });
+});
+
+router.get('/tracking/summary', (req, res) => {
+  try {
+    res.json(getTrackingSummary());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 router.post('/queue/reconcile', (req, res) => {

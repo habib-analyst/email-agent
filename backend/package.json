@@ -8,7 +8,7 @@
     "smoke": "node scripts/smoke.mjs",
     "build:usa-catalog": "node scripts/build-usa-catalog.mjs",
     "build:global-ranking": "node scripts/build-global-ranking-catalog.mjs",
-    "test": "node --test test/profileResearch.test.js test/keywordAccuracy.test.js test/directoryScrape.test.js test/interestLine.test.js test/profileUrlResolver.test.js test/facultyTitle.test.js test/pageContent.test.js test/mstFacultyUrl.test.js test/pasteImportParser.test.js test/spreadsheetParser.test.js test/deliveryFailureDedup.test.js test/sendFlowSafety.test.js test/tenantIsolation.test.js test/sentReplyStyle.test.js test/followUpService.test.js && npm run smoke"
+    "test": "node --test test/profileResearch.test.js test/keywordAccuracy.test.js test/directoryScrape.test.js test/interestLine.test.js test/profileUrlResolver.test.js test/facultyTitle.test.js test/pageContent.test.js test/mstFacultyUrl.test.js test/pasteImportParser.test.js test/spreadsheetParser.test.js test/deliveryFailureDedup.test.js test/sendFlowSafety.test.js test/tenantIsolation.test.js test/sentReplyStyle.test.js test/followUpService.test.js test/tracking.test.js && npm run smoke"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",

@@ -88,6 +88,24 @@ function ensureTenantRuntimeSchema(connection) {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(professor_email, stage)
     );
+    CREATE TABLE IF NOT EXISTS email_tracking (
+      id INTEGER PRIMARY KEY,
+      token TEXT NOT NULL UNIQUE,
+      professor_email TEXT,
+      subject TEXT,
+      mode TEXT,
+      message_id TEXT,
+      batch_id TEXT,
+      open_count INTEGER NOT NULL DEFAULT 0,
+      first_open_at DATETIME,
+      last_open_at DATETIME,
+      click_count INTEGER NOT NULL DEFAULT 0,
+      first_click_at DATETIME,
+      last_click_at DATETIME,
+      last_click_url TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_tracking_mode ON email_tracking(mode);
   `);
   const queueExists = connection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue'").get();
   if (queueExists) {
