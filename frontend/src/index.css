@@ -66,6 +66,74 @@
     border-color: rgb(var(--border-subtle));
     background-color: rgb(var(--surface-muted));
   }
+
+  .workflow-slide-preview {
+    @apply hidden;
+  }
+  .workflow-slider {
+    @apply relative overflow-hidden bg-transparent p-0 outline-none;
+    overscroll-behavior-x: none;
+  }
+  .workflow-slider-track {
+    @apply flex snap-x snap-mandatory items-start gap-4 overflow-x-auto overflow-y-hidden px-[8vw] py-0;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+    overscroll-behavior-x: none;
+    scroll-snap-stop: always;
+    cursor: grab;
+    touch-action: pan-x;
+  }
+  .workflow-slider-track.is-dragging {
+    cursor: grabbing;
+    scroll-snap-type: none;
+    user-select: none;
+  }
+  .workflow-slider-track::-webkit-scrollbar {
+    display: none;
+  }
+  .workflow-slider-item {
+    @apply min-w-[84vw] max-w-[1100px] snap-center overflow-hidden opacity-55 transition-all duration-300;
+    max-height: calc(100dvh - 7rem);
+    transform: scale(0.965);
+  }
+  .workflow-slider-item.is-active {
+    @apply opacity-100;
+    transform: scale(1);
+  }
+  .workflow-slider-mode,
+  .workflow-slider-mode body {
+    overscroll-behavior-x: none;
+  }
+  .workflow-slider-item .workflow-slide {
+    @apply overflow-hidden;
+  }
+  .workflow-slider-item .workflow-slide-content {
+    @apply min-h-0 overflow-y-auto overscroll-contain;
+    max-height: calc(100dvh - 7rem);
+    scrollbar-gutter: stable;
+    touch-action: pan-y;
+  }
+  .workflow-slider-item:not(.is-active) .workflow-slide-content {
+    @apply pointer-events-none max-h-[78px] select-none overflow-hidden blur-[0.3px];
+  }
+
+  @media (min-width: 1280px) {
+    .workflow-slider-track {
+      padding-inline: max(8vw, calc((100vw - 1180px) / 2));
+    }
+    .workflow-slider-item {
+      min-width: min(78vw, 1100px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .workflow-slider-track {
+      scroll-behavior: auto;
+    }
+    .workflow-slider-item {
+      transition: none;
+    }
+  }
   .icon-btn {
     @apply w-9 h-9 rounded-xl flex items-center justify-center transition-colors border border-transparent;
     background-color: transparent;
@@ -268,6 +336,12 @@
   flex-direction: column;
   align-items: center;
   padding: 8px 0 16px;
+}
+
+[contenteditable][data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  pointer-events: none;
 }
 .gmail-chrome-compose {
   font-family: 'Roboto', Arial, sans-serif;

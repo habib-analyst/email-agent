@@ -106,6 +106,9 @@ export function upsertRosterRow(row, { force = false } = {}) {
   const email = row.email.toLowerCase();
   const idx = rows.findIndex(r => (r.email || '').toLowerCase() === email);
   const existing = idx >= 0 ? rows[idx] : null;
+  if (!force && existing?.research_status === 'imported') {
+    return rows;
+  }
   if (!force && existing && hasSubstantiveRosterData(existing) && isSparseRosterRow(row)) {
     return rows;
   }
@@ -134,11 +137,22 @@ export function syncRosterFromDb(mode = 'instant') {
   for (const dbRow of dbRows) {
     const email = (dbRow.email || '').toLowerCase();
     if (!email) continue;
-    byEmail.set(email, mergeRosterRow(byEmail.get(email), dbRow));
+    const existingRow = byEmail.get(email);
+    if (existingRow?.research_status === 'imported') continue;
+    byEmail.set(email, mergeRosterRow(existingRow, dbRow));
   }
   const merged = [...byEmail.values()];
   writeRosterExcel(merged);
   return merged;
+}
+
+export function removeRosterRow(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return readRosterExcel();
+  const rows = readRosterExcel().filter(row => String(row.email || '').trim().toLowerCase() !== normalized);
+  writeRosterExcel(rows);
+  eventBus.publish({ type: 'roster_row_deleted', email: normalized });
+  return rows;
 }
 
 /** Write organized import rows into the live roster Excel before queue processing. */

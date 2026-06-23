@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Clock, AlertTriangle, MessageSquare, Activity, Zap, FileText, Globe, Loader2, Trash2, Search, FileSpreadsheet, Edit3, ShieldCheck, Mail, ArrowRight, RotateCcw, CheckCircle2, SkipForward, Eye, Save, X, Users } from 'lucide-react';
+import { Send, Clock, AlertTriangle, MessageSquare, Activity, Zap, FileText, Globe, Loader2, Trash2, Search, FileSpreadsheet, Edit3, ShieldCheck, Mail, ArrowRight, RotateCcw, CheckCircle2, SkipForward, Eye, Save, X, Users, ListChecks } from 'lucide-react';
 import { get, post, del, put } from '../api.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { useEventStream } from '../core/EventStreamProvider.jsx';
@@ -10,17 +10,14 @@ import { useToast } from '../components/Toast.jsx';
 import BatchScrapeProgress from '../components/BatchScrapeProgress.jsx';
 import GmailComposeChrome from '../components/GmailComposeChrome.jsx';
 import LiveRosterPanel from '../components/LiveRosterPanel.jsx';
+import ProcessingQueueTable from '../components/ProcessingQueueTable.jsx';
 import StepCard from '../components/StepCard.jsx';
 import { Table2 } from 'lucide-react';
 import AgentStepToast from '../components/AgentStepToast.jsx';
 import InstantSendTimePanel from '../components/InstantSendTimePanel.jsx';
 import WorkflowPage from '../components/layout/WorkflowPage.jsx';
-import AnalyticsInsightsSection from '../components/layout/AnalyticsInsightsSection.jsx';
-import PipelineCommandCenter from '../components/layout/PipelineCommandCenter.jsx';
-import LiveActivitySection from '../components/layout/LiveActivitySection.jsx';
-import UserActionsPanel from '../components/layout/UserActionsPanel.jsx';
+import { AnalyticsPopupRegistration } from '../context/AnalyticsPopupContext.jsx';
 import ReplyAnalyticsSection from '../components/layout/ReplyAnalyticsSection.jsx';
-import ProcessingQueueTable from '../components/ProcessingQueueTable.jsx';
 import OnboardingChecklist from '../components/OnboardingChecklist.jsx';
 import DuplicateReviewPanel from '../components/DuplicateReviewPanel.jsx';
 import ReadyForNewBanner from '../components/ReadyForNewBanner.jsx';
@@ -29,11 +26,18 @@ import RunBatchBar from '../components/RunBatchBar.jsx';
 import BulkQueueActions from '../components/BulkQueueActions.jsx';
 import CampaignPresets from '../components/CampaignPresets.jsx';
 import BasicSubjectOptions, { basicSubjectModeFromSettings } from '../components/BasicSubjectOptions.jsx';
-import ImportWebSearchToggle from '../components/ImportWebSearchToggle.jsx';
 import DesignationSkipFilter from '../components/DesignationSkipFilter.jsx';
 import useKeyboardApproval from '../hooks/useKeyboardApproval.js';
 import useResumeStep from '../hooks/useResumeStep.js';
+import { formatTime12 } from '../utils/dateTime.js';
 import useAutoClearAfterBatch from '../hooks/useAutoClearAfterBatch.js';
+import useOperationalSummary from '../hooks/useOperationalSummary.js';
+import DeliveryFailuresPanel from '../components/DeliveryFailuresPanel.jsx';
+import { useSettingsModal } from '../context/SettingsModalContext.jsx';
+import WorkflowDeck, { WorkflowSlide } from '../components/layout/WorkflowDeck.jsx';
+import CombinedLiveSection from '../components/layout/CombinedLiveSection.jsx';
+import CommandStrip from '../components/layout/CommandStrip.jsx';
+import InstantQueueHistory from '../components/InstantQueueHistory.jsx';
 
 // ─── APPROVAL CARD + COMPOSE POPUP ──────────────────────────
 function ApprovalCard({ item, onApprove, onReject, onDelete, onEdit, onSend, templateHtml, settings, sent, basicMode = false }) {
@@ -380,6 +384,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
   useEffect(() => { setMode(pageMode); }, [setMode, pageMode]);
   const { isConnected } = useGmailAuth();
   const { connected: sseConnected, subscribe } = useEventStream();
+  const { openSettings, openSentArchive } = useSettingsModal();
   const toast = useToast();
 
   const [events, setEvents] = useState([]);
@@ -392,6 +397,10 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
   const sectionImportRef = useRef(null);
   const sectionTemplateRef = useRef(null);
   const sectionPipelineRef = useRef(null);
+  const sectionProcessingRef = useRef(null);
+  const sectionActivityRef = useRef(null);
+  const sectionFailuresRef = useRef(null);
+  const sectionRepliesRef = useRef(null);
   const duplicateRef = useRef(null);
 
   // Import
@@ -431,14 +440,16 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
   const [rejectAllConfirm, setRejectAllConfirm] = useState(false);
   const [rejectingAll, setRejectingAll] = useState(false);
   const [replies, setReplies] = useState([]);
-  const [apiUsage, setApiUsage] = useState(null);
-
-  useEffect(() => {
-    if (!backendReachable) return undefined;
-    const id = setInterval(() => get('/api-usage').then(setApiUsage).catch(() => {}), 5000);
-    get('/api-usage').then(setApiUsage).catch(() => {});
-    return () => clearInterval(id);
-  }, [backendReachable]);
+  const [deliveryFailures, setDeliveryFailures] = useState([]);
+  const [queueFilter, setQueueFilter] = useState('all');
+  const [replyFilter, setReplyFilter] = useState('all');
+  const [failureFilter, setFailureFilter] = useState('all');
+  const [sendingAllProcessing, setSendingAllProcessing] = useState(false);
+  const [instantQueues, setInstantQueues] = useState([]);
+  const [instantQueuesLoading, setInstantQueuesLoading] = useState(false);
+  const [openSignals, setOpenSignals] = useState({});
+  const [highlightTarget, setHighlightTarget] = useState('');
+  const { data: apiUsage, refresh: refreshOperational, freshness } = useOperationalSummary(pageMode);
 
   const activeItem = useMemo(() => queue.find(q => ['researching', 'drafted', 'verified', 'sending'].includes(q.state)), [queue]);
   const awaitingProceedItem = useMemo(() => queue.find(q => q.state === 'awaiting_proceed'), [queue]);
@@ -467,6 +478,99 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
     sent: queue.filter(q => q.state === 'sent').length,
     failed: queue.filter(q => q.state === 'failed' || q.state === 'skipped').length,
   }), [queue]);
+  const statsForCards = useMemo(() => ({
+    ...stats,
+    deliveryFailed: apiUsage?.operational?.failures?.pending || 0,
+    notFoundFailures: apiUsage?.operational?.failures?.notFound || 0,
+    sendLimitFailures: apiUsage?.operational?.failures?.sendLimit || 0,
+  }), [stats, apiUsage]);
+
+  const navigateCard = useCallback((target, filter = 'all') => {
+    const refs = {
+      import: sectionImportRef,
+      template: sectionTemplateRef,
+      pipeline: sectionProcessingRef,
+      activity: sectionActivityRef,
+      failures: sectionFailuresRef,
+      replies: sectionRepliesRef,
+      duplicates: duplicateRef,
+    };
+    if (target === 'archive') return openSentArchive();
+    if (target === 'gmail') return openSettings();
+    if (target === 'scheduled') return navigate('/scheduled');
+    if (target === 'pipeline') setQueueFilter(filter);
+    if (target === 'failures') setFailureFilter(filter);
+    if (target === 'replies') setReplyFilter(filter);
+    setOpenSignals(current => ({ ...current, [target]: Date.now() }));
+    setHighlightTarget(target);
+    setTimeout(() => refs[target]?.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 40);
+    setTimeout(() => setHighlightTarget(current => current === target ? '' : current), 2200);
+  }, [navigate, openSentArchive, openSettings]);
+
+  const cardActions = useMemo(() => ({
+    sentHistory: { label: 'Open sent archive', onClick: () => navigateCard('archive') },
+    pipeline: { label: 'Open processing queue', onClick: () => navigateCard('pipeline', 'processing') },
+    review: { label: 'Review pending emails', onClick: () => navigateCard('template') },
+    duplicates: { label: 'Review duplicates', onClick: () => navigateCard('duplicates') },
+    failed: { label: 'Open failed work', onClick: () => navigateCard('pipeline', 'failed') },
+    notFound: { label: 'Open not-found failures', onClick: () => navigateCard('failures', 'not_found') },
+    sendLimit: { label: 'Open Gmail limits', onClick: () => navigateCard('failures', 'send_limit') },
+    activity: { label: 'Open live activity', onClick: () => navigateCard('activity') },
+    positiveReplies: { label: 'Show positive replies', onClick: () => navigateCard('replies', 'positive') },
+    negativeReplies: { label: 'Show negative replies', onClick: () => navigateCard('replies', 'negative') },
+    gmail: { label: 'Open Gmail settings', onClick: () => navigateCard('gmail') },
+    scheduledBatches: { label: 'Open scheduled mode', onClick: () => navigateCard('scheduled') },
+    totalBatches: { label: 'Open batch history', onClick: () => navigateCard('scheduled') },
+  }), [navigateCard]);
+  const workflowStages = useMemo(() => {
+    const processingCount = queue.filter(item => ['researching', 'drafted', 'verified', 'sending'].includes(item.state)).length;
+    const failedCount = queue.filter(item => item.state === 'failed').length;
+    const sentCount = queue.filter(item => item.state === 'sent').length;
+    const awaitingCount = queue.filter(item => item.state === 'awaiting_proceed').length;
+    const manualReview = (settings?.approval_mode || 'manual') === 'manual' && awaitingCount > 0;
+    return [
+      {
+        id: 'import',
+        title: 'Import professors',
+        description: 'You add the source; the agent validates and organizes every professor.',
+        icon: Globe,
+        owner: importing ? 'agent' : 'user',
+        status: importing || scrapeProgress.running ? 'active' : queue.length ? 'complete' : 'attention',
+        count: queue.length || roster.length || 0,
+        onClick: () => navigateCard('import'),
+      },
+      {
+        id: 'roster',
+        title: 'Research & roster',
+        description: 'The agent researches, removes duplicates, and updates the live roster.',
+        icon: Table2,
+        owner: 'agent',
+        status: processingCount ? 'active' : roster.length ? 'ready' : 'idle',
+        count: processingCount || roster.length || 0,
+        onClick: () => navigateCard('roster'),
+      },
+      {
+        id: 'draft',
+        title: 'Draft & approval',
+        description: manualReview ? 'Review the prepared emails before sending.' : 'The agent prepares and verifies each personalized draft.',
+        icon: Mail,
+        owner: manualReview ? 'user' : 'agent',
+        status: manualReview ? 'attention' : templateLoading ? 'active' : activeTemplate?.raw_html ? 'ready' : 'idle',
+        count: awaitingCount,
+        onClick: () => navigateCard('template'),
+      },
+      {
+        id: 'delivery',
+        title: 'Delivery & results',
+        description: 'Track sending, failures, replies, and permanent sent history.',
+        icon: Send,
+        owner: failedCount ? 'user' : 'agent',
+        status: failedCount ? 'error' : queue.some(item => item.state === 'sending') ? 'active' : sentCount ? 'complete' : 'idle',
+        count: sentCount,
+        onClick: () => navigateCard(failedCount ? 'failures' : 'pipeline', failedCount ? 'failed' : 'all'),
+      },
+    ];
+  }, [queue, roster, importing, scrapeProgress.running, settings?.approval_mode, templateLoading, activeTemplate?.raw_html, navigateCard]);
   const proceedTarget = awaitingProceedItem || (pendingProceedId ? queue.find(q => q.id === pendingProceedId) : null);
 
   const duplicateItems = useMemo(() => queue.filter(q => q.state === 'duplicate_review'), [queue]);
@@ -559,10 +663,57 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
     setResetKey(k => k + 1);
   };
 
+  const refreshProcessingQueue = useCallback(() => (
+    get(`/queue?mode=${encodeURIComponent(pageMode)}&limit=500`)
+      .then(rows => { if (Array.isArray(rows)) setQueue(rows); })
+      .catch(() => {})
+  ), [pageMode, setQueue]);
+
+  const refreshInstantQueues = useCallback(async () => {
+    setInstantQueuesLoading(true);
+    try {
+      const rows = await get(`/instant-queues?mode=${encodeURIComponent(pageMode)}`);
+      setInstantQueues(Array.isArray(rows) ? rows : []);
+    } finally {
+      setInstantQueuesLoading(false);
+    }
+  }, [pageMode]);
+
+  useEffect(() => {
+    if (backendReachable) refreshInstantQueues();
+  }, [backendReachable, pageMode, sessionVersion, refreshInstantQueues]);
+
+  const sendAllSafeProcessing = useCallback(async () => {
+    setSendingAllProcessing(true);
+    try {
+      const result = await post('/queue/send-all-safe', { mode: pageMode, confirm: true }, { timeout: 120000 });
+      await refreshProcessingQueue();
+      await loadSession({ force: true });
+      if (result.affected > 0) toast.success(`Started ${result.affected} safe pending emails`);
+      else toast.info(result.message || 'No safe pending emails to send');
+    } catch (error) {
+      toast.error(error.message || 'Send All could not start');
+    } finally {
+      setSendingAllProcessing(false);
+    }
+  }, [loadSession, pageMode, refreshProcessingQueue, toast]);
+
   const scheduleRefresh = useCallback(() => {
     clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => loadSession(), 600);
-  }, [loadSession]);
+    refreshTimerRef.current = setTimeout(() => {
+      loadSession();
+      refreshProcessingQueue();
+      refreshInstantQueues();
+    }, 600);
+  }, [loadSession, refreshInstantQueues, refreshProcessingQueue]);
+
+  const fetchDeliveryFailures = useCallback(async () => {
+    try {
+      setDeliveryFailures(await get(`/delivery-failures?mode=${pageMode}`));
+    } catch (error) {
+      toast.error(error.message || 'Could not load delivery failures');
+    }
+  }, [pageMode, toast]);
 
   const defaultSubjectEnabled = !!settings?.basic_subject_keyword;
   const searchSubjectEnabled = !!settings?.basic_search_subject_keyword;
@@ -611,7 +762,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
   const pushActivity = useCallback((entry) => {
     setActivityLog(prev => [{
       id: `${Date.now()}-${entry.stage}`,
-      time: new Date().toLocaleTimeString(),
+      time: formatTime12(new Date()),
       ...entry,
     }, ...prev].slice(0, 20));
   }, []);
@@ -674,6 +825,12 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
     });
   }, []);
 
+  const refreshRoster = useCallback(() => (
+    get(`/roster/sheet?mode=${pageMode}`)
+      .then(rows => { if (Array.isArray(rows)) setRoster(rows); })
+      .catch(() => {})
+  ), [pageMode]);
+
   useEffect(() => () => {
     clearTimeout(refreshTimerRef.current);
     clearTimeout(agentToastTimerRef.current);
@@ -685,9 +842,8 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
 
   useEffect(() => {
     get('/scrape/status').then(s => { if (s.running) setScrapeProgress(s); }).catch(() => {});
-    get(`/roster/sheet?mode=${pageMode}`).then(r => { if (Array.isArray(r) && r.length) setRoster(r); }).catch(() => {
-      get(`/roster?mode=${pageMode}`).then(r => { if (Array.isArray(r)) setRoster(r); }).catch(() => {});
-    });
+    refreshRoster();
+    refreshProcessingQueue();
 
     return subscribe((data) => {
       if (data.type === 'reset') {
@@ -738,7 +894,19 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       }
 
       if (data.type === 'roster_update') {
-        patchRosterFromEvent(data.email, { queue_state: data.queue_state, ...(data.row || {}) });
+        if (data.row?.research_status === 'imported' || data.row?.research_status === 'manual') {
+          patchRosterFromEvent(data.email, data.row);
+        }
+        return;
+      }
+      if (data.type === 'roster_row_deleted') {
+        setRoster(prev => prev.filter(row => String(row.email || '').toLowerCase() !== String(data.email || '').toLowerCase()));
+        return;
+      }
+      if (data.type === 'delivery_failure_updated') {
+        fetchDeliveryFailures();
+        refreshOperational();
+        loadSession();
         return;
       }
 
@@ -752,7 +920,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
         setScrapeProgress({ running: false });
         setFoundProfessors([]);
         if (Array.isArray(data.roster)) setRoster(data.roster);
-        get(`/roster?mode=${pageMode}`).then(r => { if (Array.isArray(r)) setRoster(r); }).catch(() => {});
+        refreshRoster();
         setImportMsg(`${data.added} professors queued · ${data.skipped} skipped${data.templateLoaded ? ' · Template loaded' : ''}${data.autoStarted ? ' · Agent auto-started' : ''}`);
         setUrlInput('');
         loadSession();
@@ -760,7 +928,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       }
       if (data.type === 'web_research_complete') {
         loadSession();
-        get(`/roster?mode=${pageMode}`).then(r => { if (Array.isArray(r)) setRoster(r); }).catch(() => {});
+        refreshRoster();
         setImportMsg(`Web research complete for ${data.professor || 'professor'} — keywords updated`);
         setTimeout(() => setImportMsg(''), 6000);
       }
@@ -769,7 +937,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
         setFoundProfessors([]);
       }
       if (data.type === 'scrape_skipped') {
-        setEvents(prev => [{ type: 'skipped', professor: data.email, time: new Date().toLocaleTimeString() }, ...prev].slice(0, 50));
+        setEvents(prev => [{ type: 'skipped', professor: data.email, time: formatTime12(new Date()) }, ...prev].slice(0, 50));
       }
       if (data.type === 'batch_auto_start') {
         setAgentStopped(false);
@@ -796,9 +964,6 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       }
       if (data.type === 'state_change') {
         patchQueueFromEvent(data);
-        if (data.professor || data.professor_email) {
-          patchRosterFromEvent(data.professor || data.professor_email, { queue_state: data.state });
-        }
         showAgentStep({ ...data, label: AGENT_STEP_LABELS[data.state] || data.state });
       }
       if (data.type === 'progress') {
@@ -816,7 +981,6 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
           } else {
             showAgentStep({ stage: 'sent', label: AGENT_STEP_LABELS.sent, professor: data.professor, subject: data.subject });
           }
-          patchRosterFromEvent(data.professor, { queue_state: 'sent' });
           setAgentStopped(false);
           // Auto-reset for single email: clear proceed state, ready for next
           if (pendingProceedIdRef.current || proceedingIdRef.current) {
@@ -846,18 +1010,26 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
         get(`/analytics?mode=${pageMode}`).then(a => { if (a?.overview) setAnalytics(a); }).catch(() => {});
       }
       if (!['stream_connected', 'stream_disconnected', 'connected'].includes(data.type)) {
-        setEvents(prev => [{ ...data, time: new Date().toLocaleTimeString() }, ...prev].slice(0, 50));
+        setEvents(prev => [{ ...data, time: formatTime12(new Date()) }, ...prev].slice(0, 50));
       }
     });
-  }, [applyReset, loadSession, scheduleRefresh, setAnalytics, subscribe, showAgentStep, patchQueueFromEvent, patchRosterFromEvent, setAuth, pageMode]);
+  }, [applyReset, loadSession, scheduleRefresh, setAnalytics, subscribe, showAgentStep, patchQueueFromEvent, patchRosterFromEvent, setAuth, pageMode, fetchDeliveryFailures, refreshOperational, refreshRoster, refreshProcessingQueue]);
 
   useEffect(() => {
     if (!backendReachable) return undefined;
     const tick = () => get(`/queue/progress?mode=${pageMode}`).then(setQueueProgress).catch(() => {});
     tick();
-    const id = setInterval(tick, 10000);
+    if (sseConnected) return undefined;
+    const id = setInterval(tick, 30000);
     return () => clearInterval(id);
-  }, [backendReachable, pageMode, queue.length, stats?.sent]);
+  }, [backendReachable, pageMode, queue.length, stats?.sent, sseConnected]);
+
+  useEffect(() => {
+    if (!backendReachable) return;
+    post('/queue/reconcile', { mode: pageMode })
+      .then(refreshProcessingQueue)
+      .catch(() => {});
+  }, [backendReachable, pageMode, sessionVersion, refreshProcessingQueue]);
 
   const currentActivity = useMemo(() => {
     if (agentStopped) return null;
@@ -876,6 +1048,10 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
     get(`/replies?mode=${pageMode}`).then(setReplies).catch(() => {});
   }, [stats?.replied, sessionVersion]);
 
+  useEffect(() => {
+    fetchDeliveryFailures();
+  }, [fetchDeliveryFailures, sessionVersion]);
+
   // Actions
   const proceedNow = async (queueId) => {
     if (!queueId) return;
@@ -883,7 +1059,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
     try {
       const res = await post(`/queue/${queueId}/proceed`);
       setQueue(prev => prev.map(q => (q.id === queueId ? { ...q, state: 'pending' } : q)));
-      showAgentStep({ stage: 'starting', label: 'Agent starting — loading template…', professor: res.professor_email });
+      showAgentStep({ stage: 'starting', label: 'Agent starting — processing professor…', professor: res.professor_email });
       setPendingProceedId(null); pendingProceedIdRef.current = null;
       setImportMsg('Agent started — processing this professor now');
       setTimeout(() => setImportMsg(''), 8000);
@@ -1000,7 +1176,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       } else {
         setFilePreview(res);
         if (res.rosterEntries?.length) {
-          get(`/roster/sheet?mode=${pageMode}`).then(r => { if (Array.isArray(r)) setRoster(r); }).catch(() => {});
+          refreshRoster();
         }
       }
     } catch (err) {
@@ -1019,6 +1195,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
     try {
       const body = {
         mode: pageMode,
+        approval_mode: settings?.approval_mode || 'manual',
         max_professors: maxProfessors ? parseInt(maxProfessors) : undefined,
       };
       if (filePreview.rosterEntries?.length) body.rosterEntries = filePreview.rosterEntries;
@@ -1037,6 +1214,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       }
       setFilePreview(null);
       loadSession();
+      refreshInstantQueues();
     } catch (err) {
       const message = err.message || 'File import failed';
       setImportMsg(`error:${message}`);
@@ -1115,10 +1293,7 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
 
   const retryItem = (id) => post(`/queue/${id}/retry`).then(loadSession);
   const deleteItem = (id) => del(`/queue/${id}`).then(loadSession).catch(() => {});
-  const sendAgain = (id) => post(`/queue/${id}/send-again`).then(loadSession);
-  const processDuplicate = (id) => post(`/queue/${id}/process`).then(loadSession);
   const rejectDuplicate = (id) => del(`/queue/${id}`).then(loadSession).catch(() => {});
-  const processAllDuplicates = (ids) => post('/queue/bulk', { action: 'process_duplicates', mode: pageMode, ids }).then(loadSession);
   const rejectAllDuplicates = (ids) => post('/queue/bulk', { action: 'skip_duplicates', mode: pageMode, ids }).then(loadSession);
 
   const startNewTask = async () => {
@@ -1196,13 +1371,15 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
         <div className="text-xs p-3 rounded-xl bg-red-50 dark:bg-neutral-800 border border-red-200 text-red-600 font-medium">{resetError}</div>
       )}
 
-      <AnalyticsInsightsSection
-        stats={stats}
+      <AnalyticsPopupRegistration
+        stats={statsForCards}
         queueStats={liveStats}
         apiUsage={apiUsage}
         health={health}
         progress={queueProgress}
         replyStats={replyStats}
+        actions={cardActions}
+        freshness={freshness}
       />
 
       <ReadyForNewBanner
@@ -1213,39 +1390,11 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
         label="outreach batch"
       />
 
-      <div ref={sectionPipelineRef} className="scroll-mt-20">
-        <PipelineCommandCenter
-          mode={pageMode}
-          agentContext={agentContext}
-        currentActivity={currentActivity}
-        activityLog={activityLog}
-        queue={queue}
-        stats={stats}
-        scrapeProgress={scrapeProgress}
-        stopped={agentStopped}
-        queueFooter={
-          <ProcessingQueueTable
-            queue={queue}
-            onClearCompleted={clearCompleted}
-            onSend={(id) => post(`/queue/${id}/send`).then(loadSession)}
-            onSendAgain={sendAgain}
-            onRejectDuplicate={rejectDuplicate}
-            onProcessDuplicate={processDuplicate}
-            onRetry={retryItem}
-            onProceed={proceedNow}
-            onDelete={deleteItem}
-            onWebSearch={webSearchQueue}
-            onWebSearchBulk={webSearchBulk}
-            webSearchingId={webSearchingId}
-            proceedingId={proceedingId}
-          />
-        }
-        />
+      <div ref={sectionPipelineRef} className={`scroll-mt-20 rounded-xl transition ${['pipeline', 'activity'].includes(highlightTarget) ? 'ring-2 ring-brand-400' : ''}`}>
+        <CombinedLiveSection currentActivity={currentActivity} queue={queue} stats={stats} scrapeProgress={scrapeProgress} stopped={agentStopped} events={events} connected={sseConnected} openSignal={Math.max(openSignals.pipeline || 0, openSignals.activity || 0)} />
       </div>
 
-      <LiveActivitySection events={events} connected={sseConnected} />
-
-      <UserActionsPanel>
+      <CommandStrip>
         <BulkQueueActions mode={pageMode} onRefresh={loadSession} />
         <RunBatchBar mode={pageMode} onStarted={loadSession} />
         <CampaignPresets onApplied={loadSession} />
@@ -1254,6 +1403,12 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
           hasTemplate={!!activeTemplate?.raw_html}
           hasSent={(stats?.sent || 0) > 0}
           modeLabel={pageLabel}
+          actions={{
+            gmail: () => navigateCard('gmail'),
+            import: () => navigateCard('import'),
+            template: () => navigateCard('template'),
+            send: () => navigateCard('archive'),
+          }}
         />
         <div className="flex items-center justify-between gap-3 pt-2 border-t border-[rgb(var(--border-subtle))]">
           <ResetNotice scope={pageLabel} />
@@ -1271,23 +1426,20 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
             </div>
           )}
         </div>
-      </UserActionsPanel>
-
-      {(awaitingItems.length > 0 && (settings?.approval_mode || 'manual') === 'manual') && (
-        <div className="panel p-3 border-violet-500/30 bg-violet-500/5">
-          <p className="text-xs font-semibold text-violet-800 dark:text-violet-200 mb-1">
-            {awaitingItems.length} email(s) waiting for your approval
-          </p>
-          <p className="text-[10px] text-violet-600 dark:text-violet-400">Open Email draft below to review and send.</p>
-        </div>
-      )}
+      </CommandStrip>
 
       {/* ─── STEP 1: Import Professors ─── */}
+      <WorkflowDeck activeId={highlightTarget}>
+      <WorkflowSlide id="import" title="Import" icon={Globe} status={importing ? 'Working' : 'Ready'}>
       <div ref={sectionImportRef} className="scroll-mt-20">
         <StepCard step={1} title="Import" subtitle="Faculty URL, email list, or file upload · send time advisor" icon={Globe}
           active={importing || scrapeProgress.running}
           done={queue.length > 0}
+          owner={importing || scrapeProgress.running ? 'agent' : 'user'}
+          statusLabel={importing || scrapeProgress.running ? 'Agent importing' : queue.length > 0 ? 'Imported' : 'Add professors'}
+          actionRequired={!importing && !scrapeProgress.running && queue.length === 0}
           defaultOpen={isEmptyWorkspace || importing || scrapeProgress.running}
+          openSignal={openSignals.import}
         >
           <InstantSendTimePanel embedded />
 
@@ -1302,8 +1454,6 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
               onToggleSearch={toggleSearchSubject}
             />
           )}
-
-          <ImportWebSearchToggle className="mb-3" />
 
           <DesignationSkipFilter value={skipDesignations} onChange={setSkipDesignations} className="mb-3" />
 
@@ -1418,30 +1568,69 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
       </div>
 
       {/* ─── STEP 2: Excel Roster ─── */}
-      <StepCard step={2} title="Excel roster" subtitle="Agent processes one-by-one from this sheet" icon={Table2}
-        active={roster.length > 0 && queue.some(q => ['researching','drafted','verified'].includes(q.state))}
-        done={roster.length > 0 && roster.every(r => ['sent','skipped'].includes(r.queue_state))}
+      </WorkflowSlide>
+      <WorkflowSlide id="roster" title="Excel roster" icon={Table2} badge={roster.length}>
+      <StepCard step={2} title="Excel roster" subtitle="Your imported sheet · changed only by your add, edit, or delete actions" icon={Table2}
+        done={roster.length > 0}
+        owner="user"
+        statusLabel={roster.length ? `${roster.length} imported rows` : 'Waiting for import'}
         defaultOpen={roster.length > 0}
+        openSignal={openSignals.roster}
       >
         <LiveRosterPanel
           rows={roster}
           mode={pageMode}
-          activeEmail={liveCompose?.professor || activeItem?.professor_email}
           onClear={async () => { await post('/roster/clear'); setRoster([]); }}
-          onSave={loadSession}
-          onWebSearch={webSearchFromRoster}
-          onWebSearchBulk={webSearchBulk}
-          webSearchingId={webSearchingId}
-          live
+          onSave={() => { refreshRoster(); loadSession(); }}
         />
       </StepCard>
 
       {/* ─── STEP 3: Email Template Draft ─── */}
+      </WorkflowSlide>
+      <WorkflowSlide id="pipeline" title="Processing" icon={Activity} badge={queue.length || undefined}>
+      <div ref={sectionProcessingRef} className={`scroll-mt-20 rounded-xl transition ${highlightTarget === 'pipeline' ? 'ring-2 ring-brand-400' : ''}`}>
+        <StepCard
+          step={3}
+          title={instantQueues[0] ? `Processing · Queue #${instantQueues[0].queue_number}` : 'Processing'}
+          subtitle="Research, duplicate verification, drafting, sending, sent, and failure history"
+          icon={Activity}
+          active={queue.some(item => ['researching', 'drafted', 'verified', 'sending'].includes(item.state))}
+          done={queue.length > 0 && queue.every(item => ['sent', 'replied', 'skipped', 'failed'].includes(item.state))}
+          owner="agent"
+          actionRequired={queue.some(item => ['awaiting_proceed', 'needs_review', 'duplicate_review'].includes(item.state))}
+          statusLabel={`${queue.length} processing records`}
+          defaultOpen={queue.length > 0}
+          openSignal={openSignals.pipeline}
+        >
+          <ProcessingQueueTable
+            queue={queue}
+            onSend={id => post(`/queue/${id}/send`).then(loadSession)}
+            onRejectDuplicate={rejectDuplicate}
+            onRetry={retryItem}
+            onProceed={proceedNow}
+            onDelete={deleteItem}
+            onWebSearch={webSearchQueue}
+            onWebSearchBulk={webSearchBulk}
+            webSearchingId={webSearchingId}
+            proceedingId={proceedingId}
+            onSendAll={sendAllSafeProcessing}
+            sendingAll={sendingAllProcessing}
+            filter={queueFilter}
+            onClearFilter={() => setQueueFilter('all')}
+          />
+        </StepCard>
+      </div>
+      </WorkflowSlide>
+      <WorkflowSlide id="template" title="Email draft" icon={Mail} badge={awaitingItems.length || undefined}>
       <div ref={sectionTemplateRef} className="scroll-mt-20">
-        <StepCard step={3} title="Email draft" subtitle="Review and edit template before sending" icon={Mail}
+        <StepCard step={4} title="Email draft" subtitle="Review and edit template before sending" icon={Mail}
           active={activeTemplate && !templateSaved}
           done={templateSaved}
+          owner={(settings?.approval_mode || 'manual') === 'manual' && awaitingItems.length > 0 ? 'user' : 'agent'}
+          actionRequired={(settings?.approval_mode || 'manual') === 'manual' && awaitingItems.length > 0}
+          statusLabel={awaitingItems.length > 0 ? `${awaitingItems.length} need review` : templateSaved ? 'Template saved' : activeTemplate?.raw_html ? 'Draft ready' : 'Waiting for template'}
           defaultOpen={!!activeTemplate?.raw_html || awaitingItems.length > 0 || duplicateItems.length > 0}
+          openSignal={openSignals.template || openSignals.duplicates}
         >
           <GmailComposeChrome
             key={`compose-${pageMode}-${activeTemplate?.id || 'empty'}`}
@@ -1459,19 +1648,6 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
             basicMode={isBasicMode}
             basicSubjectMode={isBasicMode ? basicSubjectMode : 'fixed'}
           />
-
-          <div ref={duplicateRef}>
-            <DuplicateReviewPanel
-              items={duplicateItems}
-              duplicatePolicy={settings?.duplicate_policy}
-              onProcess={processDuplicate}
-              onProcessAll={processAllDuplicates}
-              onSendAgain={sendAgain}
-              onReject={rejectDuplicate}
-              onRejectAll={rejectAllDuplicates}
-              onDelete={deleteItem}
-            />
-          </div>
 
           {/* ─── Pending Approval Section (Manual Mode) ─── */}
           {(settings?.approval_mode || 'manual') === 'manual' && (
@@ -1554,7 +1730,50 @@ export default function Instant({ pageMode = 'instant', pageLabel = 'Instant' })
         </StepCard>
       </div>
 
-      <ReplyAnalyticsSection replies={replies} onRefresh={loadSession} />
+      </WorkflowSlide>
+      <WorkflowSlide id="failures" title="Delivery failures" icon={AlertTriangle} badge={deliveryFailures.length || undefined}>
+      <div ref={sectionFailuresRef} className={`scroll-mt-20 rounded-xl transition ${highlightTarget === 'failures' ? 'ring-2 ring-red-400' : ''}`}>
+        <StepCard step={5} title="Delivery failures" subtitle="Bounces, not-found addresses, and Gmail limits" icon={AlertTriangle} owner="user" actionRequired={deliveryFailures.some(item => item.status === 'pending')} statusLabel={`${deliveryFailures.length} records`} openSignal={openSignals.failures}>
+          <DeliveryFailuresPanel failures={deliveryFailures} onRefresh={fetchDeliveryFailures} filter={failureFilter} onClearFilter={() => setFailureFilter('all')} mode={pageMode} />
+        </StepCard>
+      </div>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="duplicates" title="Duplicates" icon={ShieldCheck} badge={duplicateItems.length || undefined}>
+        <div ref={duplicateRef} className="scroll-mt-20">
+          <StepCard step={6} title="Duplicates" subtitle="Previously contacted professors remain protected" icon={ShieldCheck} owner="user" actionRequired={duplicateItems.length > 0} statusLabel={duplicateItems.length ? `${duplicateItems.length} need review` : 'Protected'} openSignal={openSignals.duplicates}>
+            <DuplicateReviewPanel items={duplicateItems} onReject={rejectDuplicate} onRejectAll={rejectAllDuplicates} onDelete={deleteItem} />
+          </StepCard>
+        </div>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="completed-queues" title="Completed queues" icon={ListChecks} badge={instantQueues.filter(item => item.status === 'completed').length || undefined}>
+        <StepCard
+          step={7}
+          title="Completed queues"
+          subtitle={`Permanent ${isBasicMode ? 'Basic Instant' : 'Normal Instant'} queue history`}
+          icon={ListChecks}
+          owner="agent"
+          done={instantQueues.some(item => item.status === 'completed')}
+          statusLabel={`${instantQueues.length} queue${instantQueues.length === 1 ? '' : 's'} tracked`}
+        >
+          <InstantQueueHistory
+            mode={pageMode}
+            queues={instantQueues}
+            loading={instantQueuesLoading}
+            onRefresh={refreshInstantQueues}
+          />
+        </StepCard>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="replies" title="Replies" icon={MessageSquare} badge={replies.length || undefined}>
+      <div ref={sectionRepliesRef} className={`scroll-mt-20 rounded-xl transition ${highlightTarget === 'replies' ? 'ring-2 ring-brand-400' : ''}`}>
+        <StepCard step={8} title="Replies" subtitle="Classified professor replies and manual response actions" icon={MessageSquare} owner="user" statusLabel={`${replies.length} replies`} openSignal={openSignals.replies}>
+          <ReplyAnalyticsSection replies={replies} onRefresh={loadSession} filter={replyFilter} onClearFilter={() => setReplyFilter('all')} openSignal={openSignals.replies} />
+        </StepCard>
+      </div>
+      </WorkflowSlide>
+      </WorkflowDeck>
     </WorkflowPage>
   );
 }

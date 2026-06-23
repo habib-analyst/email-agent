@@ -1,19 +1,27 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Loader2, MessageSquare, RefreshCw } from 'lucide-react';
 import ReplyHub from '../ReplyHub.jsx';
 import SectionShell from './SectionShell.jsx';
 import { post } from '../../api.js';
 import { useToast } from '../Toast.jsx';
+import { useEventStream } from '../../core/EventStreamProvider.jsx';
 
-export default function ReplyAnalyticsSection({ replies, onRefresh, className = '' }) {
+export default function ReplyAnalyticsSection({ replies, onRefresh, className = '', filter = 'all', onClearFilter, openSignal = 0 }) {
   const count = replies?.length ?? 0;
   const [scanning, setScanning] = useState(false);
   const toast = useToast();
+  const { subscribe } = useEventStream();
+
+  useEffect(() => subscribe(event => {
+    if (['reply_updated', 'reply_scan_complete', 'reply_scenarios_updated'].includes(event.type)) {
+      onRefresh?.();
+    }
+  }), [onRefresh, subscribe]);
 
   const scanReplies = async () => {
     setScanning(true);
     try {
-      const result = await post('/replies/scan', { windowDays: 14, maxResults: 250 }, { timeout: 180000 });
+      const result = await post('/replies/scan', { maxResults: 500 }, { timeout: 180000 });
       toast.success(result.imported
         ? `${result.imported} new ${result.imported === 1 ? 'reply' : 'replies'} scanned, saved, and analyzed`
         : 'Inbox scan complete - no new replies');
@@ -51,8 +59,9 @@ export default function ReplyAnalyticsSection({ replies, onRefresh, className = 
       noPadding
       collapsible
       defaultOpen
+      openSignal={openSignal}
     >
-      <ReplyHub replies={replies} onRefresh={onRefresh} embedded />
+      <ReplyHub replies={replies} onRefresh={onRefresh} embedded filter={filter} onClearFilter={onClearFilter} />
     </SectionShell>
   );
 }

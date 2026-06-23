@@ -14,6 +14,14 @@ import SettingsModal from './components/SettingsModal.jsx';
 import { SettingsModalProvider, useSettingsModal } from './context/SettingsModalContext.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import { TimezoneProvider } from './context/TimezoneContext.jsx';
+import { WorkflowLayoutProvider } from './context/WorkflowLayoutContext.jsx';
+import { AnalyticsPopupProvider } from './context/AnalyticsPopupContext.jsx';
+
+if (window.location.hostname === '127.0.0.1') {
+  const canonical = new URL(window.location.href);
+  canonical.hostname = 'localhost';
+  window.location.replace(canonical.toString());
+}
 
 function OAuthHandler() {
   const { loadSession } = useSession();
@@ -61,7 +69,7 @@ function AnimatedRoutes() {
 }
 
 function AppShell() {
-  const { open, closeSettings } = useSettingsModal();
+  const { open, closeSettings, sentArchiveRequest } = useSettingsModal();
 
   return (
     <div className="flex flex-col h-screen overflow-hidden min-w-0 w-full bg-surface-page">
@@ -70,17 +78,17 @@ function AppShell() {
       <main className="flex-1 overflow-auto min-w-0 w-full">
         <AnimatedRoutes />
       </main>
-      <footer className="shrink-0 border-t border-[rgb(var(--border-subtle))] bg-[rgb(var(--surface-page))] py-2.5 text-center">
+      <footer className="shrink-0 border-t border-[rgb(var(--border-subtle))] bg-[rgb(var(--surface-page))] px-4 py-1 text-center">
         <a
           href="https://habib.top"
           target="_blank"
           rel="noreferrer"
-          className="text-[11px] font-medium text-muted hover:text-brand-600 dark:hover:text-brand-400 transition-colors"
+          className="inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium text-muted transition-colors hover:text-brand-600 dark:hover:text-brand-400"
         >
           Developed by Habib Ur Rehman
         </a>
       </footer>
-      <SettingsModal open={open} onClose={closeSettings} />
+      <SettingsModal open={open} onClose={closeSettings} sentArchiveRequest={sentArchiveRequest} />
     </div>
   );
 }
@@ -92,11 +100,15 @@ export default function App() {
         <TimezoneProvider>
           <SessionProvider>
             <BrowserRouter>
-              <SettingsModalProvider>
-                <EventStreamProvider>
-                  <AppShell />
-                </EventStreamProvider>
-              </SettingsModalProvider>
+              <WorkflowLayoutProvider>
+                <AnalyticsPopupProvider>
+                  <SettingsModalProvider>
+                    <EventStreamProvider>
+                      <AppShell />
+                    </EventStreamProvider>
+                  </SettingsModalProvider>
+                </AnalyticsPopupProvider>
+              </WorkflowLayoutProvider>
             </BrowserRouter>
           </SessionProvider>
         </TimezoneProvider>

@@ -1,6 +1,8 @@
 /**
  * Central real-time event stream — connects all UI components to backend EventBus via SSE.
  */
+import { getSessionToken } from '../api.js';
+
 class EventStreamService {
   constructor() {
     this.listeners = new Set();
@@ -19,7 +21,8 @@ class EventStreamService {
   }
 
   _open() {
-    this.es = new EventSource('/api/queue/stream');
+    const session = getSessionToken();
+    this.es = new EventSource(`/api/queue/stream${session ? `?session=${encodeURIComponent(session)}` : ''}`);
     this.es.onopen = () => {
       this.connected = true;
       this.backoff = 3000;

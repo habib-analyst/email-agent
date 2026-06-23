@@ -4,30 +4,37 @@ import { stopScheduler } from '../pipeline/scheduler.js';
 import { GmailService } from './GmailService.js';
 import { runWeeklyDigest } from '../learning/index.js';
 import { eventBus } from '../core/EventBus.js';
-import db from '../db/index.js';
+import db, { currentTenantKey } from '../db/index.js';
 
-let cronJobs = [];
-let replyCheckRunning = false;
+const runtimeStates = new Map();
+
+function runtimeState() {
+  const tenant = currentTenantKey() || 'anonymous';
+  if (!runtimeStates.has(tenant)) runtimeStates.set(tenant, { cronJobs: [], replyCheckRunning: false });
+  return runtimeStates.get(tenant);
+}
 
 function startReplyCheck() {
+  const state = runtimeState();
   const job = cron.schedule('* * * * *', async () => {
-    if (replyCheckRunning) return;
-    replyCheckRunning = true;
+    if (state.replyCheckRunning) return;
+    state.replyCheckRunning = true;
     try { await GmailService.classifyInboxReplies(); }
     catch (e) { console.error('[Cron] classifyReplies error:', e.message); }
-    finally { replyCheckRunning = false; }
+    finally { state.replyCheckRunning = false; }
   });
-  cronJobs.push(job);
+  state.cronJobs.push(job);
 }
 
 function startWeeklyDigest() {
+  const state = runtimeState();
   const job = cron.schedule('0 9 * * 1', async () => {
     try {
       const digest = runWeeklyDigest(eventBus.publish.bind(eventBus));
       console.log('[Digest]', JSON.stringify(digest));
     } catch (e) { console.error('[Cron] digest error:', e.message); }
   });
-  cronJobs.push(job);
+  state.cronJobs.push(job);
 }
 
 export const PipelineService = {
@@ -36,22 +43,26 @@ export const PipelineService = {
   },
 
   startCronJobs() {
+    const state = runtimeState();
+    if (state.cronJobs.length) return;
     startReplyCheck();
     startWeeklyDigest();
     console.log('[PipelineService] Cron jobs started');
   },
 
   stop() {
+    const state = runtimeState();
     stopWorker();
     stopScheduler();
-    for (const job of cronJobs) job.stop();
-    cronJobs = [];
+    for (const job of state.cronJobs) job.stop();
+    state.cronJobs = [];
   },
 
   status() {
+    const state = runtimeState();
     return {
       ...getWorkerStatus(),
-      cronJobs: cronJobs.length,
+      cronJobs: state.cronJobs.length,
     };
   },
 

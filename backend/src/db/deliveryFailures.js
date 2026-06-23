@@ -29,9 +29,9 @@ export function recordDeliveryFailure({
 
   const info = db.prepare(`
     INSERT INTO delivery_failures
-      (professor_email, failure_type, reason, source, mode, message_id, thread_id, batch_id, draft_id, queue_id, raw_excerpt, received_at)
+      (professor_email, failure_type, reason, source, mode, message_id, thread_id, batch_id, draft_id, queue_id, raw_excerpt, status, received_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', COALESCE(?, datetime('now')))
   `).run(
     email,
     failure_type,

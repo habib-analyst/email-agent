@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { resolve } from 'path';
 import { loadApiKeys, selectModelsForTier } from './loadApiKeys.js';
+import { currentTenantKey } from '../db/index.js';
 
 dotenv.config({ path: resolve(import.meta.dirname, '../../.env') });
 
@@ -20,7 +21,7 @@ function validateConfig(cfg) {
   return warnings;
 }
 
-export const config = {
+const baseConfig = {
   googleClientId: process.env.GOOGLE_CLIENT_ID,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
   googleRedirectUri: process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/api/auth/callback',
@@ -50,4 +51,24 @@ export const config = {
   dryRunSend: process.env.DRY_RUN_SEND === 'true',
 };
 
-export const configWarnings = validateConfig(config);
+const tenantOverrides = new Map();
+
+export const config = new Proxy(baseConfig, {
+  get(target, property) {
+    const tenant = currentTenantKey();
+    const overrides = tenant ? tenantOverrides.get(tenant) : null;
+    return overrides && Object.hasOwn(overrides, property) ? overrides[property] : target[property];
+  },
+  set(target, property, value) {
+    const tenant = currentTenantKey();
+    if (!tenant) {
+      target[property] = value;
+      return true;
+    }
+    if (!tenantOverrides.has(tenant)) tenantOverrides.set(tenant, {});
+    tenantOverrides.get(tenant)[property] = value;
+    return true;
+  },
+});
+
+export const configWarnings = validateConfig(baseConfig);

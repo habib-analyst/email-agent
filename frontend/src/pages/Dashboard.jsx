@@ -10,6 +10,7 @@ import { useSession } from '../context/SessionContext.jsx';
 import PageLayout from '../components/layout/PageLayout.jsx';
 import ModeWizard from '../components/ModeWizard.jsx';
 import CampaignPresets from '../components/CampaignPresets.jsx';
+import { formatDateTime12 } from '../utils/dateTime.js';
 
 const MODE_CARDS = [
   {
@@ -307,12 +308,12 @@ function AdminUsersPanel({ data, updating, onStatusChange, onFeatureToggle }) {
                   <td className="px-3 py-2 text-muted">{user.has_resume ? 'Resume' : 'No resume'} · {user.has_custom_api ? 'Custom API' : 'Default API'}</td>
                   <td className="px-3 py-2 text-muted whitespace-nowrap">
                     {user.last_sent_at
-                      ? `Sent ${new Date(user.last_sent_at).toLocaleString()}`
+                      ? `Sent ${formatDateTime12(user.last_sent_at)}`
                       : user.last_batch_at
-                        ? `${user.last_batch_status || 'Batch'} ${new Date(user.last_batch_at).toLocaleString()}`
+                        ? `${user.last_batch_status || 'Batch'} ${formatDateTime12(user.last_batch_at)}`
                         : 'No outreach yet'}
                   </td>
-                  <td className="px-3 py-2 text-muted whitespace-nowrap">{user.last_login_at ? new Date(user.last_login_at).toLocaleString() : '-'}</td>
+                  <td className="px-3 py-2 text-muted whitespace-nowrap">{formatDateTime12(user.last_login_at, '-')}</td>
                   <td className="px-3 py-2">
                     {user.role === 'admin' ? (
                       <span className="block text-right text-[10px] text-muted">Protected</span>

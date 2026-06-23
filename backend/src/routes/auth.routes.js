@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { AuthService } from '../services/AuthService.js';
+import { revokeTenantSession } from '../services/tenantRegistry.js';
+import { SESSION_COOKIE } from '../middleware/tenantSession.js';
 
 const router = Router();
 
@@ -9,8 +11,15 @@ router.get('/url', (req, res) => {
 
 router.get('/callback', async (req, res) => {
   try {
-    await AuthService.connectWithCode(req.query.code);
-    res.redirect(AuthService.getFrontendRedirect(true));
+    const result = await AuthService.connectWithCode(req.query.code, req.query.state);
+    res.cookie(SESSION_COOKIE, result.sessionToken, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 365 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+    res.redirect(AuthService.getFrontendRedirect(true, { session: result.sessionToken }));
   } catch (e) {
     res.redirect(AuthService.getFrontendRedirect(false, { msg: e.message }));
   }
@@ -44,6 +53,8 @@ router.post('/refresh-sender', async (req, res) => {
 
 router.post('/disconnect', async (req, res) => {
   await AuthService.disconnect();
+  revokeTenantSession(req.sessionToken);
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
   res.json({ success: true, ...AuthService.getStatus() });
 });
 

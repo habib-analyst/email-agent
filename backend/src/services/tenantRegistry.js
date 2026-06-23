@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { resolve } from 'path';
 import { existsSync, mkdirSync } from 'fs';
+import { createHash, randomBytes } from 'crypto';
 
 export const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || 'habib.gcuf.edu@gmail.com').trim().toLowerCase();
 
@@ -47,6 +48,15 @@ registry.exec(`
     detail_json TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS tenant_sessions (
+    token_hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(email) REFERENCES tenants(email) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_tenant_sessions_email ON tenant_sessions(email);
 `);
 for (const sql of [
   "ALTER TABLE tenants ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
@@ -116,6 +126,44 @@ export function listTenants() {
 export function getTenant(email) {
   return registry.prepare('SELECT * FROM tenants WHERE email=?')
     .get(String(email || '').trim().toLowerCase()) || null;
+}
+
+function sessionHash(token) {
+  return createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+export function createTenantSession(email, days = 365) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!getTenant(normalized)) throw new Error('Cannot create session for unknown tenant');
+  const token = randomBytes(32).toString('base64url');
+  registry.prepare(`
+    INSERT INTO tenant_sessions (token_hash, email, expires_at)
+    VALUES (?, ?, datetime('now', ?))
+  `).run(sessionHash(token), normalized, `+${Math.max(1, Number(days) || 30)} days`);
+  return token;
+}
+
+export function getTenantSession(token) {
+  if (!token) return null;
+  const row = registry.prepare(`
+    SELECT s.email, s.expires_at, t.*
+    FROM tenant_sessions s
+    JOIN tenants t ON t.email=s.email
+    WHERE s.token_hash=? AND s.expires_at > datetime('now')
+  `).get(sessionHash(token));
+  if (!row) return null;
+  registry.prepare(`
+    UPDATE tenant_sessions
+    SET last_seen_at=CURRENT_TIMESTAMP,
+        expires_at=datetime('now', '+365 days')
+    WHERE token_hash=?
+  `).run(sessionHash(token));
+  return row;
+}
+
+export function revokeTenantSession(token) {
+  if (!token) return;
+  registry.prepare('DELETE FROM tenant_sessions WHERE token_hash=?').run(sessionHash(token));
 }
 
 function parseJson(value, fallback) {

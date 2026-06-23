@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Save, CheckCircle2, Sliders, FileText, Trash2, AlertTriangle, Loader2, X, Minimize2, Maximize2, KeyRound, Plus, Unplug, Upload } from 'lucide-react';
+import { Save, CheckCircle2, Sliders, FileText, Trash2, AlertTriangle, Loader2, X, Minimize2, Maximize2, KeyRound, Plus, Unplug, Upload, Activity, Radio, Bot } from 'lucide-react';
 import { put, get, post, del, uploadFile } from '../api.js';
 import { useSession } from '../context/SessionContext.jsx';
 import GmailConnectionCard from './GmailConnectionCard.jsx';
 import ArchivePanel from './ArchivePanel.jsx';
 import DuplicatePolicySelect from './DuplicatePolicySelect.jsx';
+import { useEventStream } from '../core/EventStreamProvider.jsx';
 
 function newRowId() {
   return `row-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -32,8 +33,9 @@ function isRowConnected(row) {
   return !!(row.savedId && row.masked);
 }
 
-export default function SettingsModal({ open, onClose }) {
-  const { settings: s, auth, loadSession, resetAllSession, resetting, setSettings } = useSession();
+export default function SettingsModal({ open, onClose, sentArchiveRequest = 0 }) {
+  const { settings: s, auth, health, backendReachable, connectionsSettled, loadSession, resetAllSession, resetting, setSettings } = useSession();
+  const { connected: liveConnected } = useEventStream();
   const [local, setLocal] = useState(null);
   const [saved, setSaved] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -349,9 +351,38 @@ export default function SettingsModal({ open, onClose }) {
           </div>
 
             <div className={`p-5 space-y-5 overflow-auto ${maximized ? 'h-[calc(100vh-80px)]' : 'max-h-[70vh]'}`}>
+              <div className="card p-5 space-y-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-[rgb(var(--text-primary))]">System & account status</h3>
+                  <p className="mt-1 text-[11px] text-muted">Connection, agent, and sender identity used by every mode.</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {[
+                    { label: 'Backend', value: backendReachable && connectionsSettled ? 'Available' : 'Offline', ok: backendReachable && connectionsSettled, icon: Activity },
+                    { label: 'Live events', value: liveConnected ? 'Connected' : 'Reconnecting', ok: liveConnected, icon: Radio },
+                    { label: 'Agent', value: health?.running ? (health?.activeWorkers > 0 ? 'Active' : 'Ready') : 'Idle', ok: !!health?.running, icon: Bot },
+                  ].map(item => (
+                    <div key={item.label} className="rounded-xl border border-[rgb(var(--border-subtle))] bg-[rgb(var(--surface-muted))]/45 p-3">
+                      <div className="flex items-center gap-2">
+                        <item.icon className={`h-4 w-4 ${item.ok ? 'text-emerald-500' : 'text-amber-500'}`} />
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-muted">{item.label}</span>
+                      </div>
+                      <p className="mt-2 text-sm font-semibold text-[rgb(var(--text-primary))]">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+                {(auth?.senderName || auth?.senderEmail) && (
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3 dark:border-emerald-900/40 dark:bg-emerald-950/15">
+                    <p className="text-[9px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">Connected sender</p>
+                    <p className="mt-1 text-sm font-semibold text-[rgb(var(--text-primary))]">{auth.senderName || 'Gmail account'}</p>
+                    <p className="font-mono text-[11px] text-muted">{auth.senderEmail}</p>
+                  </div>
+                )}
+              </div>
+
               <GmailConnectionCard variant="card" />
 
-              <ArchivePanel />
+              <ArchivePanel openSentArchiveSignal={sentArchiveRequest} />
 
               <div className="card p-6 space-y-4">
                 <div className="flex items-center justify-between gap-2">

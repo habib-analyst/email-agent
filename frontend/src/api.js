@@ -4,10 +4,31 @@ const BOOTSTRAP_TIMEOUT = 8000;
 const POST_TIMEOUT = 60000;
 
 export { BOOTSTRAP_TIMEOUT };
+const SESSION_KEY = 'email_agent_session';
+let sessionVerified = false;
+
+export function getSessionToken() {
+  return localStorage.getItem(SESSION_KEY) || '';
+}
+
+export function setSessionToken(token) {
+  sessionVerified = false;
+  if (token) localStorage.setItem(SESSION_KEY, token);
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+export function markSessionVerified() {
+  sessionVerified = true;
+}
+
+export function isSessionVerified() {
+  return sessionVerified;
+}
 
 async function parse(res) {
   const data = await res.json().catch(() => ({ _parseError: true }));
   if (!res.ok) {
+    if (res.status === 401 && data.code === 'SESSION_REQUIRED') setSessionToken('');
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
     err.data = data;
@@ -22,7 +43,15 @@ async function request(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeout / 1000}s: ${path}`)), timeout);
   try {
-    const res = await fetch(BASE + path, { ...options, signal: controller.signal });
+    const headers = new Headers(options.headers || {});
+    const session = getSessionToken();
+    if (session) headers.set('X-Session-Token', session);
+    const res = await fetch(BASE + path, {
+      ...options,
+      headers,
+      credentials: 'include',
+      signal: controller.signal,
+    });
     return parse(res);
   } catch (e) {
     if (e.name === 'AbortError') {

@@ -1,4 +1,4 @@
-import db from '../db/index.js';
+import db, { currentTenantKey } from '../db/index.js';
 import { scrapeFacultyPage } from '../research/index.js';
 import { enrichProfessorFromScrape, buildScrapeRosterRow, getProfileResearchStatus, profileResearchStatusLabelForDossier } from '../research/profileResearch.js';
 import { basicLastNameResearch, hasBasicLastName } from '../research/basicLastNameResearch.js';
@@ -10,7 +10,11 @@ import { delay } from './utils.js';
 import { upsertRosterRow, syncRosterFromDb, readRosterExcel, hasSubstantiveRosterData, isSparseRosterRow } from '../learning/rosterExcel.js';
 import { capitalizeWord } from '../utils/professor.js';
 
-let activeJob = null;
+const activeJobs = new Map();
+
+function activeJob() {
+  return activeJobs.get(currentTenantKey() || 'anonymous') || null;
+}
 
 function jobAborted(job) {
   if (!job || job.cancelled) return true;
@@ -18,16 +22,19 @@ function jobAborted(job) {
 }
 
 export function getScrapeStatus() {
-  if (!activeJob?.running) return { running: false };
-  return { ...activeJob, running: true };
+  const job = activeJob();
+  if (!job?.running) return { running: false };
+  return { ...job, running: true };
 }
 
 export function cancelScrapeJob() {
-  if (activeJob) activeJob.cancelled = true;
+  const job = activeJob();
+  if (job) job.cancelled = true;
 }
 
 export function resetScrapeJob() {
-  if (activeJob) activeJob.cancelled = true;
+  const job = activeJob();
+  if (job) job.cancelled = true;
 }
 
 function hasUsefulData(dossier, mode = 'instant') {
@@ -41,7 +48,8 @@ function hasUsefulData(dossier, mode = 'instant') {
 }
 
 export function startFacultyImport(url, publish, options = {}) {
-  if (activeJob?.running && !activeJob.cancelled) {
+  const current = activeJob();
+  if (current?.running && !current.cancelled) {
     return { started: false, error: 'Import already in progress' };
   }
 
@@ -65,7 +73,8 @@ export function startFacultyImport(url, publish, options = {}) {
     roster: [],
     queuedIds: [],
   };
-  activeJob = job;
+  const tenant = currentTenantKey() || 'anonymous';
+  activeJobs.set(tenant, job);
 
   runImport(job, url, publish).catch(e => {
     if (!jobAborted(job)) {
@@ -74,7 +83,7 @@ export function startFacultyImport(url, publish, options = {}) {
     }
   }).finally(() => {
     job.running = false;
-    if (activeJob === job) activeJob = null;
+    if (activeJobs.get(tenant) === job) activeJobs.delete(tenant);
   });
 
   return { started: true };
@@ -93,7 +102,7 @@ async function runImport(job, url, publish) {
     onProgress: (p) => {
       if (jobAborted(job)) return;
       Object.assign(job, p);
-      if (activeJob === job) publish({ type: 'scrape_progress', ...p });
+      if (activeJob() === job) publish({ type: 'scrape_progress', ...p });
     },
     onFound: (p) => {
       if (jobAborted(job)) return;

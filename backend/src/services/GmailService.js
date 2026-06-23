@@ -57,34 +57,26 @@ export const GmailService = {
 
   /** Auto-load template from Email_Template.txt — seeds both modes if empty */
   async tryAutoLoadTemplate(source, mode = 'instant') {
-    // Seed both modes if their template is empty
-    const results = [];
-    for (const m of ['instant', 'basic_instant', 'scheduled']) {
-      const table = m === 'scheduled' ? 'scheduled_template' : 'template';
-      const existing = m === 'scheduled'
-        ? db.prepare(`SELECT raw_html FROM ${table} LIMIT 1`).get()
-        : db.prepare(`SELECT raw_html FROM ${table} WHERE mode=?`).get(m);
-      if (existing?.raw_html) {
-        results.push({ mode: m, success: false, reason: 'template_already_set' });
-        continue;
-      }
-      try {
-        const result = await Promise.race([
-          m === 'basic_instant'
-            ? Promise.resolve(seedBasicInstantTemplate()).then(() => ({ success: true }))
-            : loadTemplateFromFile(m),
-          new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'timeout' }), 20000)),
-        ]);
-        if (result.success) {
-          eventBus.publish({ type: 'template_loaded', source, mode: m });
-        }
-        results.push({ mode: m, ...result });
-      } catch (e) {
-        results.push({ mode: m, success: false, reason: e.message });
-      }
+    const table = mode.includes('scheduled') ? 'scheduled_template' : 'template';
+    const existing = db.prepare(`SELECT raw_html FROM ${table} WHERE mode=?`).get(mode);
+    if (existing?.raw_html) {
+      return { mode, success: false, reason: 'template_already_set' };
     }
-    // Return result for the requested mode
-    return results.find(r => r.mode === mode) || results[0];
+
+    try {
+      const result = await Promise.race([
+        mode === 'basic_instant'
+          ? Promise.resolve(seedBasicInstantTemplate()).then(() => ({ success: true }))
+          : loadTemplateFromFile(mode),
+        new Promise(resolve => setTimeout(() => resolve({ success: false, reason: 'timeout' }), 20000)),
+      ]);
+      if (result.success) {
+        eventBus.publish({ type: 'template_loaded', source, mode });
+      }
+      return { mode, ...result };
+    } catch (e) {
+      return { mode, success: false, reason: e.message };
+    }
   },
 };
 

@@ -12,6 +12,8 @@ import { applyUserApiKeysFromDb } from './services/userApiKeys.js';
 import { repairBasicInstantTemplate } from './db/templateStore.js';
 import { securityHeaders } from './middleware/security.js';
 import { requireActiveTenant, requireFeature } from './middleware/tenantAccess.js';
+import { tenantSessionContext } from './middleware/tenantSession.js';
+import { reconcilePersistedWork } from './services/startupReconciliation.js';
 process.on('uncaughtException', (e) => console.error('[FATAL] Uncaught exception:', e));
 process.on('unhandledRejection', (e) => console.error('[FATAL] Unhandled rejection:', e));
 
@@ -30,11 +32,12 @@ app.use(cors({
     callback(new Error('Origin not allowed'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-  credentials: false,
+  allowedHeaders: ['Content-Type', 'X-Session-Token'],
+  credentials: true,
 }));
 app.use(securityHeaders);
 app.use(express.json({ limit: '10mb' }));
+app.use(tenantSessionContext);
 app.use('/api', router);
 app.use('/api/scheduled', requireActiveTenant, requireFeature('scheduled'), scheduledRouter);
 
@@ -82,6 +85,7 @@ app.listen(config.port, () => {
     repairBasicInstantTemplate();
     seedBothModes();
     startArchiveListener();
+    reconcilePersistedWork();
     PipelineService.startCronJobs();
     PipelineService.start();
     startScheduler();

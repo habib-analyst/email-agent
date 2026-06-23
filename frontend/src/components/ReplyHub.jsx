@@ -1,265 +1,394 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
-  MessageSquare, ThumbsUp, ThumbsDown, Minus, Send, Trash2,
-  Edit3, Paperclip, Loader2, X, Sparkles,
+  CheckCircle2, ChevronDown, ChevronUp, Edit3, FilePlus2, Loader2,
+  Mail, MessageSquare, Plus, Save, Send, X, XCircle,
 } from 'lucide-react';
-import { post, put, del } from '../api.js';
+import { get, post, put } from '../api.js';
 import { useToast } from './Toast.jsx';
+import { formatDateTime12 } from '../utils/dateTime.js';
 
-const CLASSIFICATION_COLORS = {
+const COLORS = {
   positive: 'bg-emerald-100 text-emerald-700 dark:bg-neutral-800 dark:text-emerald-400',
   negative: 'bg-red-100 text-red-700 dark:bg-red-900/20 dark:text-red-400',
-  neutral: 'bg-gray-100 text-gray-700 dark:bg-neutral-900/20 dark:text-gray-400',
+  neutral: 'bg-gray-100 text-gray-700 dark:bg-neutral-800 dark:text-gray-300',
   auto_reply: 'bg-amber-100 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400',
 };
 
-const CLASSIFICATION_ICONS = {
-  positive: ThumbsUp,
-  negative: ThumbsDown,
-  neutral: Minus,
-  auto_reply: MessageSquare,
-};
-
-function Badge({ cls, children }) {
-  return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold ${CLASSIFICATION_COLORS[cls] || CLASSIFICATION_COLORS.neutral}`}>
-      {children}
-    </span>
-  );
+function Badge({ children, className = '' }) {
+  return <span className={`inline-flex rounded px-2 py-1 text-[10px] font-semibold ${className}`}>{children}</span>;
 }
 
-function formatTimestamp(ts) {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  } catch { return ts; }
+function formatTime(value) {
+  return formatDateTime12(value, '-');
 }
 
-function formatDuration(ms) {
-  if (!ms) return '-';
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${(ms / 60000).toFixed(1)}m`;
+function scenarioHtml(template, lastName) {
+  const body = String(template || '').replace(/\[Last Name\]|\{\{LAST_NAME\}\}/gi, lastName || '');
+  return body.split(/\n{2,}/).map(block => `<p>${block.replace(/\n/g, '<br>')}</p>`).join('');
 }
 
-export default function ReplyHub({ replies, onRefresh, embedded = false }) {
+export default function ReplyHub({ replies = [], onRefresh, embedded = false, filter = 'all', onClearFilter }) {
   const toast = useToast();
-  const [expandedId, setExpandedId] = useState(null);
-  const [suggestingId, setSuggestingId] = useState(null);
-  const [deletingId, setDeletingId] = useState(null);
-  const [sendingId, setSendingId] = useState(null);
+  const editorRef = useRef(null);
+  const [scenarios, setScenarios] = useState([]);
+  const [expandedScenario, setExpandedScenario] = useState(null);
+  const [editingScenario, setEditingScenario] = useState(null);
+  const [scenarioForm, setScenarioForm] = useState(null);
+  const [showNewScenario, setShowNewScenario] = useState(false);
+  const [newScenario, setNewScenario] = useState({ name: '', description: '', body_template: '' });
+  const [working, setWorking] = useState('');
+  const [compose, setCompose] = useState(null);
+  const [localReplies, setLocalReplies] = useState(replies);
 
-  // Compose popup state
-  const [composeOpen, setComposeOpen] = useState(false);
-  const [composeReply, setComposeReply] = useState(null);
-  const [composeSubject, setComposeSubject] = useState('');
-  const [composeHtml, setComposeHtml] = useState('');
-  const [composeFile, setComposeFile] = useState(null);
-  const [composeSending, setComposeSending] = useState(false);
-  const [composeDrafting, setComposeDrafting] = useState(false);
-  const editRef = useRef(null);
-
-  const toggleExpand = useCallback((id) => {
-    setExpandedId(prev => prev === id ? null : id);
-  }, []);
-
-  const handleSuggest = useCallback(async (id) => {
-    setSuggestingId(id);
+  const loadScenarios = useCallback(async () => {
     try {
-      const res = await post(`/replies/${id}/suggest`);
-      onRefresh?.();
-    } catch (err) {
-      toast.error(err.message || 'Could not generate suggestion');
-    } finally {
-      setSuggestingId(null);
+      setScenarios(await get('/reply-scenarios'));
+    } catch (error) {
+      toast.error(error.message || 'Could not load reply scenarios');
     }
-  }, [onRefresh, toast]);
+  }, [toast]);
 
-  const handleDelete = useCallback(async (id) => {
-    setDeletingId(id);
-    try {
-      await del(`/replies/${id}`);
-      onRefresh?.();
-    } catch (err) {
-      toast.error(err.message || 'Could not delete reply');
-    } finally {
-      setDeletingId(null);
+  useEffect(() => { loadScenarios(); }, [loadScenarios]);
+  useEffect(() => { setLocalReplies(replies); }, [replies]);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([loadScenarios(), onRefresh?.()]);
+  }, [loadScenarios, onRefresh]);
+
+  const filteredReplies = useMemo(() => localReplies.filter(reply => {
+    if (!filter || filter === 'all') return true;
+    if (filter === 'answered') return !!reply.replied_by_user;
+    return reply.classification === filter;
+  }), [localReplies, filter]);
+
+  const groups = useMemo(() => {
+    const map = new Map();
+    for (const reply of filteredReplies) {
+      const key = reply.scenario_name || 'Unclassified / Needs Review';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(reply);
     }
-  }, [onRefresh, toast]);
+    return [...map.entries()];
+  }, [filteredReplies]);
 
-  const openCompose = useCallback((reply) => {
-    setComposeReply(reply);
-    setComposeSubject(reply.reply_subject || `Re: ${reply.original_subject || ''}`);
-    setComposeHtml(reply.suggested_reply || '');
-    setComposeFile(null);
-    setComposeOpen(true);
-    // Delay setting contentEditable innerHTML so the DOM node exists first
-    setTimeout(() => {
-      if (editRef.current) {
-        editRef.current.innerHTML = reply.suggested_reply || '';
-      }
-    }, 0);
-  }, []);
-
-  const closeCompose = useCallback(() => {
-    setComposeOpen(false);
-    setComposeReply(null);
-    setComposeSubject('');
-    setComposeHtml('');
-    setComposeFile(null);
-  }, []);
-
-  const handleSend = useCallback(async () => {
-    if (!composeReply) return;
-    const html = editRef.current?.innerHTML || composeHtml;
-    setComposeSending(true);
-    try {
-      await post(`/replies/${composeReply.id}/send`, {
-        html,
-        subject: composeSubject,
-        attachment_path: composeFile?.name || null,
-      });
-      onRefresh?.();
-      closeCompose();
-    } catch (err) {
-      toast.error(err.message || 'Could not send reply');
-    } finally {
-      setComposeSending(false);
-    }
-  }, [composeReply, composeHtml, composeSubject, composeFile, onRefresh, closeCompose, toast]);
-
-  const handleSaveDraft = useCallback(async () => {
-    if (!composeReply) return;
-    const html = editRef.current?.innerHTML || composeHtml;
-    setComposeDrafting(true);
-    try {
-      await put(`/replies/${composeReply.id}/draft`, {
-        suggested_reply: html,
-        reply_subject: composeSubject,
-      });
-      onRefresh?.();
-      closeCompose();
-    } catch (err) {
-      toast.error(err.message || 'Could not save draft');
-    } finally {
-      setComposeDrafting(false);
-    }
-  }, [composeReply, composeHtml, composeSubject, onRefresh, closeCompose, toast]);
-
-  const handleFileChange = useCallback((e) => {
-    const file = e.target.files?.[0];
-    if (file) setComposeFile(file);
-  }, []);
-
-  if (!replies?.length) {
-    return (
-      <div className={embedded ? 'p-6 text-center' : 'space-y-3'}>
-        {!embedded && (
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center">
-              <MessageSquare className="w-4 h-4 text-white" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-sm text-gray-900 dark:text-white">Reply Hub</h3>
-              <p className="text-[10px] text-muted">No professor replies yet</p>
-            </div>
-          </div>
-        )}
-        {embedded && (
-          <p className="text-sm text-muted">No professor replies yet — analytics will appear here after replies arrive.</p>
-        )}
-      </div>
+  const openCompose = useCallback((reply, htmlOverride) => {
+    setCompose(reply);
+    const html = htmlOverride || reply.suggested_reply || (
+      reply.scenario_body_template
+        ? scenarioHtml(reply.scenario_body_template, reply.professor_last_name)
+        : ''
     );
-  }
+    setTimeout(() => { if (editorRef.current) editorRef.current.innerHTML = html; }, 0);
+  }, []);
+
+  const assignScenario = async (reply, scenarioId, shouldCompose = false) => {
+    setWorking(`assign-${reply.id}`);
+    try {
+      const result = await put(`/replies/${reply.id}/scenario`, { scenario_id: Number(scenarioId) });
+      const selectedScenario = scenarios.find(item => item.id === Number(scenarioId));
+      const updatedReply = {
+        ...reply,
+        ...result.reply,
+        scenario_id: Number(scenarioId),
+        scenario_name: selectedScenario?.name || reply.scenario_name,
+        scenario_body_template: selectedScenario?.body_template || reply.scenario_body_template,
+      };
+      setLocalReplies(current => current.map(item => item.id === reply.id ? updatedReply : item));
+      if (shouldCompose) openCompose(updatedReply, result.reply.suggested_reply);
+      await refresh();
+    } catch (error) {
+      toast.error(error.message || 'Could not assign scenario');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const prepareReply = async reply => {
+    if (reply.suggested_reply) return openCompose(reply);
+    if (reply.scenario_id) return assignScenario(reply, reply.scenario_id, true);
+    toast.error('Choose a reply scenario first');
+  };
+
+  const saveLocalDraft = async () => {
+    const html = editorRef.current?.innerHTML || '';
+    setWorking('save-draft');
+    try {
+      const result = await put(`/replies/${compose.id}/draft`, { suggested_reply: html });
+      setLocalReplies(current => current.map(item => item.id === compose.id ? { ...item, ...result.reply } : item));
+      toast.success('Reply draft saved');
+      setCompose(null);
+      await refresh();
+    } catch (error) {
+      toast.error(error.message || 'Could not save draft');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const saveGmailDraft = async () => {
+    const html = editorRef.current?.innerHTML || '';
+    setWorking('gmail-draft');
+    try {
+      await post(`/replies/${compose.id}/gmail-draft`, { html });
+      toast.success('Draft saved in Gmail');
+      setCompose(null);
+      await refresh();
+    } catch (error) {
+      toast.error(error.message || 'Could not create Gmail draft');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const sendReply = async () => {
+    const html = editorRef.current?.innerHTML || '';
+    if (!window.confirm(`Send this reply manually to ${compose.professor_email}?`)) return;
+    setWorking('send-reply');
+    try {
+      await post(`/replies/${compose.id}/send`, { html });
+      toast.success('Reply sent');
+      setCompose(null);
+      await refresh();
+    } catch (error) {
+      toast.error(error.message || 'Could not send reply');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const rejectReply = async reply => {
+    if (!window.confirm(`Reject this reply record for ${reply.professor_email}? It will remain in history.`)) return;
+    setWorking(`reject-${reply.id}`);
+    try {
+      await post(`/replies/${reply.id}/reject`);
+      await refresh();
+    } catch (error) {
+      toast.error(error.message || 'Could not reject reply');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const resendOriginal = async reply => {
+    if (!window.confirm(`Resend the original outreach to ${reply.professor_email}? This is allowed only once for this reply.`)) return;
+    setWorking(`resend-${reply.id}`);
+    try {
+      await post(`/replies/${reply.id}/resend-original`, { confirm: true }, { timeout: 120000 });
+      toast.success('Original outreach resent once');
+      await refresh();
+    } catch (error) {
+      toast.error(error.message || 'Could not resend original outreach');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const saveScenario = async scenario => {
+    setWorking(`scenario-${scenario.id}`);
+    try {
+      await put(`/reply-scenarios/${scenario.id}`, scenarioForm);
+      setEditingScenario(null);
+      setScenarioForm(null);
+      await loadScenarios();
+    } catch (error) {
+      toast.error(error.message || 'Could not save scenario');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const createScenario = async () => {
+    setWorking('new-scenario');
+    try {
+      await post('/reply-scenarios', newScenario);
+      setShowNewScenario(false);
+      setNewScenario({ name: '', description: '', body_template: '' });
+      await loadScenarios();
+    } catch (error) {
+      toast.error(error.message || 'Could not create scenario');
+    } finally {
+      setWorking('');
+    }
+  };
+
+  const composeFromScenario = scenario => {
+    const reply = localReplies.find(item =>
+      item.scenario_id === scenario.id && !['sending', 'sent', 'rejected'].includes(item.workflow_status)
+    );
+    if (!reply) return toast.error('No open reply currently matches this scenario');
+    assignScenario(reply, scenario.id, true);
+  };
+
+  const counts = {
+    auto: localReplies.filter(reply => reply.classification === 'auto_reply').length,
+    positive: localReplies.filter(reply => reply.classification === 'positive').length,
+    negative: localReplies.filter(reply => reply.classification === 'negative').length,
+    answered: localReplies.filter(reply => reply.replied_by_user).length,
+  };
 
   return (
-    <section className={embedded ? 'p-4 space-y-3' : 'space-y-3'}>
-      {!embedded && (
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center">
-            <MessageSquare className="w-4 h-4 text-white" />
-          </div>
+    <section className={embedded ? 'p-4 space-y-5' : 'space-y-5'}>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
           <div>
-            <h3 className="font-semibold text-sm text-gray-900 dark:text-white">Reply Hub</h3>
-            <p className="text-[10px] text-muted">{replies.length} professor replies — classify, suggest, respond</p>
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Replies scenarios drafts</h3>
+            <p className="text-[10px] text-muted">Reusable manual drafts. Classification never sends email.</p>
           </div>
+          <button onClick={() => setShowNewScenario(value => !value)} className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-[10px] font-semibold">
+            <Plus className="h-3 w-3" /> New scenario
+          </button>
+        </div>
+
+        {showNewScenario && (
+          <div className="grid gap-2 rounded-xl border border-gray-200 p-3 dark:border-neutral-700">
+            <input className="rounded-lg border bg-transparent px-3 py-2 text-xs" placeholder="Scenario name" value={newScenario.name} onChange={e => setNewScenario({ ...newScenario, name: e.target.value })} />
+            <input className="rounded-lg border bg-transparent px-3 py-2 text-xs" placeholder="Description used for classification" value={newScenario.description} onChange={e => setNewScenario({ ...newScenario, description: e.target.value })} />
+            <textarea className="min-h-32 rounded-lg border bg-transparent px-3 py-2 text-xs" placeholder="Use [Last Name] in the greeting" value={newScenario.body_template} onChange={e => setNewScenario({ ...newScenario, body_template: e.target.value })} />
+            <button onClick={createScenario} disabled={working === 'new-scenario'} className="w-fit rounded-lg bg-emerald-600 px-3 py-2 text-[10px] font-semibold text-white disabled:opacity-50">Save scenario</button>
+          </div>
+        )}
+
+        <div className="max-h-[560px] overflow-y-auto pr-1">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {scenarios.map(scenario => {
+            const editing = editingScenario === scenario.id;
+            const expanded = expandedScenario === scenario.id;
+            return (
+              <div key={scenario.id} className="rounded-xl border border-gray-100 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-900">
+                {editing ? (
+                  <div className="space-y-2">
+                    <input className="w-full rounded border bg-transparent px-2 py-1 text-xs" value={scenarioForm.name} onChange={e => setScenarioForm({ ...scenarioForm, name: e.target.value })} />
+                    <input className="w-full rounded border bg-transparent px-2 py-1 text-xs" value={scenarioForm.description || ''} onChange={e => setScenarioForm({ ...scenarioForm, description: e.target.value })} />
+                    <textarea className="min-h-36 w-full rounded border bg-transparent px-2 py-1 text-xs" value={scenarioForm.body_template} onChange={e => setScenarioForm({ ...scenarioForm, body_template: e.target.value })} />
+                    <div className="flex gap-2">
+                      <button onClick={() => saveScenario(scenario)} className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600"><Save className="h-3 w-3" /> Save</button>
+                      <button onClick={() => setEditingScenario(null)} className="text-[10px] text-muted">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-semibold text-gray-900 dark:text-white">{scenario.name}</p>
+                        <p className="mt-1 text-[10px] text-muted">{scenario.description}</p>
+                      </div>
+                      <Badge className="bg-gray-100 text-gray-600 dark:bg-neutral-800 dark:text-gray-300">{scenario.reply_count || 0}</Badge>
+                    </div>
+                    {expanded && (
+                      <div className="gmail-chrome-compose mt-3 overflow-hidden rounded-lg border border-gray-200 dark:border-neutral-700">
+                        <div className="gmail-chrome-header">
+                          <span className="gmail-chrome-header-title">Reply</span>
+                          <div className="gmail-chrome-window-btns"><X className="h-3 w-3" /></div>
+                        </div>
+                        <div className="gmail-chrome-row gmail-chrome-row-to">
+                          <span className="gmail-chrome-label">To</span>
+                          <span className="gmail-chrome-recipients flex-1">professor@university.edu</span>
+                        </div>
+                        <div className="gmail-chrome-row">
+                          <span className="gmail-chrome-label">Last name</span>
+                          <span className="gmail-chrome-recipients">[Last Name]</span>
+                        </div>
+                        <div className="max-h-52 overflow-y-auto bg-white px-4 py-3 text-[12px] leading-5 text-[#202124]">
+                          <div dangerouslySetInnerHTML={{ __html: scenarioHtml(scenario.body_template, '[Last Name]') }} />
+                        </div>
+                      </div>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button onClick={() => setExpandedScenario(expanded ? null : scenario.id)} className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-600">{expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />} View</button>
+                      <button onClick={() => { setEditingScenario(scenario.id); setScenarioForm({ ...scenario }); }} className="inline-flex items-center gap-1 text-[10px] font-semibold text-violet-600"><Edit3 className="h-3 w-3" /> Edit</button>
+                      <button onClick={() => composeFromScenario(scenario)} className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600"><Mail className="h-3 w-3" /> Gmail compose</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+        {[
+          ['All replies', localReplies.length],
+          ['Positive', counts.positive],
+          ['Negative', counts.negative],
+          ['Auto replies', counts.auto],
+          ['Reply by Yes', counts.answered],
+        ].map(([label, count]) => (
+          <div key={label} className="rounded-lg border border-gray-100 bg-white px-3 py-2 dark:border-neutral-800 dark:bg-neutral-900">
+            <p className="text-[9px] font-semibold uppercase tracking-wider text-muted">{label}</p>
+            <p className="text-lg font-bold text-gray-900 dark:text-white">{count}</p>
+          </div>
+        ))}
+      </div>
+      {filter !== 'all' && (
+        <div className="flex items-center justify-between rounded-lg border border-brand-200 bg-brand-50/50 px-3 py-2 text-xs dark:border-brand-900/40 dark:bg-brand-950/10">
+          <span>Showing reply filter: <strong>{filter.replace(/_/g, ' ')}</strong></span>
+          <button type="button" onClick={onClearFilter} className="font-semibold text-brand-600 hover:underline">Clear filter</button>
         </div>
       )}
 
-      {/* Reply list */}
-      {embedded ? (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-            {['positive', 'negative', 'neutral', 'auto_reply'].map(cls => (
-              <div key={cls} className="rounded-lg border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2">
-                <p className="text-[9px] uppercase tracking-wider font-semibold text-muted">{cls === 'auto_reply' ? 'Auto Reply' : cls}</p>
-                <p className="text-lg font-bold tabular-nums text-gray-900 dark:text-white">{replies.filter(r => (r.classification || 'neutral') === cls).length}</p>
-              </div>
-            ))}
-            <div className="rounded-lg border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2">
-              <p className="text-[9px] uppercase tracking-wider font-semibold text-muted">Replied</p>
-              <p className="text-lg font-bold tabular-nums text-gray-900 dark:text-white">{replies.filter(r => r.reply_sent === 1).length}</p>
-            </div>
-            <div className="rounded-lg border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2">
-              <p className="text-[9px] uppercase tracking-wider font-semibold text-muted">Suggestions</p>
-              <p className="text-lg font-bold tabular-nums text-gray-900 dark:text-white">{replies.filter(r => r.suggested_reply).length}</p>
-            </div>
+      {!filteredReplies.length ? (
+        <div className="p-6 text-center text-sm text-muted">No replies found in Gmail yet.</div>
+      ) : groups.map(([groupName, rows]) => (
+        <div key={groupName} className="overflow-hidden rounded-xl border border-gray-100 bg-white dark:border-neutral-800 dark:bg-neutral-900">
+          <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-neutral-800">
+            <MessageSquare className="h-3.5 w-3.5 text-emerald-600" />
+            <h4 className="text-xs font-semibold text-gray-900 dark:text-white">{groupName}</h4>
+            <Badge className="ml-auto bg-gray-100 text-gray-600 dark:bg-neutral-800 dark:text-gray-300">{rows.length}</Badge>
           </div>
-
-          <div className="overflow-auto max-h-[420px] rounded-xl border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-            <table className="w-full min-w-[920px] text-[11px]">
-              <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-neutral-800 border-b border-gray-100 dark:border-neutral-700">
-                <tr className="text-left text-muted">
-                  <th className="px-3 py-2 font-semibold">Professor</th>
-                  <th className="px-3 py-2 font-semibold">Class</th>
-                  <th className="px-3 py-2 font-semibold">Summary</th>
-                  <th className="px-3 py-2 font-semibold">Original Subject</th>
-                  <th className="px-3 py-2 font-semibold">Received</th>
-                  <th className="px-3 py-2 font-semibold text-right">Process Time</th>
-                  <th className="px-3 py-2 font-semibold text-right">Actions</th>
+          <div className="max-h-[440px] overflow-auto">
+            <table className="w-full min-w-[1150px] text-[11px]">
+              <thead className="bg-gray-50 text-left text-muted dark:bg-neutral-800">
+                <tr>
+                  <th className="px-3 py-2">Professor</th>
+                  <th className="px-3 py-2">Class</th>
+                  <th className="px-3 py-2">Summary</th>
+                  <th className="px-3 py-2">Received</th>
+                  <th className="px-3 py-2">Reply by</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Scenario</th>
+                  <th className="px-3 py-2 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {replies.map(reply => {
-                  const isSent = reply.reply_sent === 1;
-                  const hasSuggestion = reply.suggested_reply && reply.suggested_reply.trim().length > 0;
+                {rows.map(reply => {
+                  const terminal = ['sending', 'sent', 'rejected'].includes(reply.workflow_status);
                   return (
-                    <tr key={reply.id} className="border-b border-gray-100 dark:border-neutral-800 hover:bg-gray-50/70 dark:hover:bg-neutral-800/50">
-                      <td className="px-3 py-2 font-mono font-medium text-gray-800 dark:text-gray-200 truncate max-w-[190px]" title={reply.professor_email}>
-                        {reply.professor_email}
+                    <tr key={reply.id} className="border-t border-gray-100 align-top dark:border-neutral-800">
+                      <td className="max-w-[190px] truncate px-3 py-2 font-mono" title={reply.professor_email}>{reply.professor_email}</td>
+                      <td className="px-3 py-2"><Badge className={COLORS[reply.classification] || COLORS.neutral}>{reply.classification || 'neutral'}</Badge></td>
+                      <td className="max-w-[260px] truncate px-3 py-2 text-muted" title={reply.reply_body || reply.summary}>{reply.summary || '-'}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-muted">{formatTime(reply.received_at)}</td>
+                      <td className="px-3 py-2">
+                        {reply.replied_by_user
+                          ? <Badge className="bg-emerald-100 text-emerald-700"><CheckCircle2 className="mr-1 h-3 w-3" />Yes</Badge>
+                          : <Badge className="bg-gray-100 text-gray-600"><XCircle className="mr-1 h-3 w-3" />No</Badge>}
                       </td>
-                      <td className="px-3 py-2"><Badge cls={reply.classification}>{reply.classification || 'neutral'}</Badge></td>
-                      <td className="px-3 py-2 text-muted truncate max-w-[260px]" title={reply.reply_body || reply.summary || ''}>{reply.summary || '-'}</td>
-                      <td className="px-3 py-2 text-muted truncate max-w-[210px]" title={reply.original_subject || ''}>{reply.original_subject || '-'}</td>
-                      <td className="px-3 py-2 text-muted whitespace-nowrap">{formatTimestamp(reply.received_at) || '-'}</td>
-                      <td className="px-3 py-2 text-right text-muted tabular-nums">{formatDuration(reply.total_duration_ms || reply.draft_duration_ms || reply.research_duration_ms)}</td>
+                      <td className="px-3 py-2"><Badge className="bg-gray-100 text-gray-700 dark:bg-neutral-800 dark:text-gray-300">{reply.workflow_status || 'new'}</Badge></td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={String(reply.scenario_id || '')}
+                          onChange={e => assignScenario(reply, e.target.value)}
+                          disabled={working === `assign-${reply.id}`}
+                          className="max-w-[220px] rounded border bg-white px-2 py-1 text-[10px] dark:bg-neutral-900 disabled:opacity-60"
+                          title={terminal ? 'Change classification only; status remains unchanged' : 'Change reply scenario'}
+                        >
+                          <option value="" disabled>Needs Review</option>
+                          {scenarios.filter(item => item.active).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                      </td>
                       <td className="px-3 py-2">
                         <div className="flex justify-end gap-1.5">
-                          {!hasSuggestion && !isSent && (
-                            <button
-                              onClick={() => handleSuggest(reply.id)}
-                              disabled={suggestingId === reply.id}
-                              className="text-[10px] px-2 py-1 rounded-lg border border-violet-200 dark:border-violet-800 text-violet-600 dark:text-violet-400 font-medium disabled:opacity-50"
-                            >
-                              {suggestingId === reply.id ? '...' : 'Suggest'}
-                            </button>
+                          <button onClick={() => window.alert(reply.reply_body || reply.summary || 'No body')} className="rounded border px-2 py-1 text-[10px]">View</button>
+                          {!terminal && <button onClick={() => prepareReply(reply)} disabled={working === `assign-${reply.id}`} className="rounded border border-emerald-200 px-2 py-1 text-[10px] text-emerald-700">Scenario reply</button>}
+                          {reply.classification === 'auto_reply' && !reply.original_resent_at && !terminal && (
+                            <button onClick={() => resendOriginal(reply)} disabled={working === `resend-${reply.id}`} className="rounded border border-amber-200 px-2 py-1 text-[10px] text-amber-700">Original resend</button>
                           )}
-                          {hasSuggestion && !isSent && (
-                            <button
-                              onClick={() => openCompose(reply)}
-                              className="text-[10px] px-2 py-1 rounded-lg border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 font-medium"
-                            >
-                              Reply
-                            </button>
-                          )}
-                          {isSent && <span className="text-[10px] px-2 py-1 rounded-lg bg-emerald-100 text-emerald-700 dark:bg-neutral-800 dark:text-emerald-400 font-medium">Sent</span>}
-                          <button
-                            onClick={() => handleDelete(reply.id)}
-                            disabled={deletingId === reply.id}
-                            className="text-[10px] px-2 py-1 rounded-lg border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 font-medium disabled:opacity-50"
-                          >
-                            {deletingId === reply.id ? '...' : 'Delete'}
-                          </button>
+                          {reply.original_resent_at && <Badge className="bg-amber-100 text-amber-700">Resent</Badge>}
+                          {!terminal && <button onClick={() => rejectReply(reply)} disabled={working === `reject-${reply.id}`} className="rounded border border-red-200 px-2 py-1 text-[10px] text-red-600">Reject</button>}
+                          {reply.workflow_status === 'sent' && <Badge className="bg-emerald-100 text-emerald-700">Sent {formatTime(reply.reply_sent_at)}</Badge>}
                         </div>
                       </td>
                     </tr>
@@ -269,185 +398,77 @@ export default function ReplyHub({ replies, onRefresh, embedded = false }) {
             </table>
           </div>
         </div>
-      ) : (
-      <div className="space-y-2">
-        {replies.map((reply) => {
-          const Icon = CLASSIFICATION_ICONS[reply.classification] || Minus;
-          const isExpanded = expandedId === reply.id;
-          const isSent = reply.reply_sent === 1;
-          const hasSuggestion = reply.suggested_reply && reply.suggested_reply.trim().length > 0;
+      ))}
 
-          return (
-            <div
-              key={reply.id}
-              className="rounded-xl border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 space-y-2"
-            >
-              {/* Top row: badge + email + timestamp + sent badge */}
-              <div className="flex items-center gap-2">
-                <Badge cls={reply.classification}>{reply.classification || 'neutral'}</Badge>
-                <Icon className="w-3.5 h-3.5 text-gray-400" />
-                <span className="text-xs font-medium text-gray-900 dark:text-white truncate max-w-[200px]">
-                  {reply.professor_email}
-                </span>
-                <span className="text-[10px] text-muted ml-auto whitespace-nowrap">
-                  {formatTimestamp(reply.received_at)}
-                </span>
-                {isSent && (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-100 text-emerald-700 dark:bg-neutral-800 dark:text-emerald-400">
-                    Sent
-                  </span>
-                )}
-              </div>
-
-              {/* Summary */}
-              {reply.summary && (
-                <p className="text-[11px] text-muted line-clamp-2">{reply.summary}</p>
-              )}
-
-              {/* Expandable suggested reply preview */}
-              {hasSuggestion && (
-                <div>
-                  <button
-                    onClick={() => toggleExpand(reply.id)}
-                    className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1 font-medium"
-                  >
-                    <Sparkles className="w-3 h-3" />
-                    {isExpanded ? 'Hide suggestion' : 'Show AI suggestion'}
-                  </button>
-                  {isExpanded && (
-                    <div
-                      className="mt-2 p-3 rounded-lg bg-white border border-gray-100 dark:border-neutral-800 text-[11px] text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-[Roboto,sans-serif] leading-[1.6]"
-                      style={{ fontSize: '14px' }}
-                    >
-                      {reply.suggested_reply}
-                    </div>
-                  )}
+      {compose && createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/45 p-3 backdrop-blur-[2px] sm:p-6">
+          <button type="button" aria-label="Close reply composer" className="absolute inset-0 cursor-default" onClick={() => setCompose(null)} />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Reply to ${compose.professor_email}`}
+            className="relative flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-[0_24px_80px_rgba(0,0,0,0.35)] dark:border-neutral-700 dark:bg-neutral-900"
+          >
+            <div className="flex shrink-0 items-center justify-between bg-[#40464f] px-4 py-3 text-white">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <MessageSquare className="h-4 w-4 shrink-0" />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">Reply in Gmail conversation</p>
+                  <p className="truncate text-[10px] text-gray-300">Your reply will appear after the professor’s latest message</p>
                 </div>
-              )}
-
-              {/* Action buttons */}
-              <div className="flex items-center gap-1.5 pt-1">
-                {!hasSuggestion && !isSent && (
-                  <button
-                    onClick={() => handleSuggest(reply.id)}
-                    disabled={suggestingId === reply.id}
-                    className="text-[10px] px-2.5 py-1.5 flex items-center gap-1.5 rounded-lg border border-violet-200 dark:border-violet-800 text-violet-600 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors font-medium disabled:opacity-50"
-                  >
-                    {suggestingId === reply.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                    Suggest AI Reply
-                  </button>
-                )}
-                {hasSuggestion && !isSent && (
-                  <button
-                    onClick={() => openCompose(reply)}
-                    className="text-[10px] px-2.5 py-1.5 flex items-center gap-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors font-medium"
-                  >
-                    <Edit3 className="w-3 h-3" /> Compose &amp; Send
-                  </button>
-                )}
-                {isSent && (
-                  <span className="text-[10px] px-2.5 py-1.5 flex items-center gap-1.5 rounded-lg bg-gray-50 dark:bg-neutral-800 text-gray-400 font-medium">
-                    <Send className="w-3 h-3" /> Reply sent
-                  </span>
-                )}
-                <button
-                  onClick={() => handleDelete(reply.id)}
-                  disabled={deletingId === reply.id}
-                  className="text-[10px] px-2.5 py-1.5 flex items-center gap-1.5 rounded-lg border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors font-medium disabled:opacity-50 ml-auto"
-                >
-                  {deletingId === reply.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                  Delete
-                </button>
               </div>
-            </div>
-          );
-        })}
-      </div>
-      )}
-
-      {/* Compose popup modal */}
-      {composeOpen && composeReply && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          {/* Backdrop */}
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeCompose} />
-
-          {/* Modal */}
-          <div className="relative w-full max-w-lg mx-4 rounded-xl border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-xl space-y-3 p-4">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Edit3 className="w-4 h-4 text-emerald-600" />
-                <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Compose Reply</h4>
-                <span className="text-[10px] text-muted">{composeReply.professor_email}</span>
-              </div>
-              <button onClick={closeCompose} className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-neutral-800 transition-colors">
-                <X className="w-4 h-4 text-gray-400" />
+              <button type="button" onClick={() => setCompose(null)} className="rounded-md p-1.5 text-gray-200 hover:bg-white/10 hover:text-white" aria-label="Close">
+                <X className="h-4 w-4" />
               </button>
             </div>
 
-            {/* Subject */}
-            <div>
-              <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1 block">Subject</label>
-              <input
-                type="text"
-                value={composeSubject}
-                onChange={(e) => setComposeSubject(e.target.value)}
-                className="w-full text-sm px-3 py-2 rounded-lg border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
-              />
+            <div className="shrink-0 border-b border-gray-200 bg-white px-5 py-3 dark:border-neutral-700 dark:bg-neutral-900">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-sm font-bold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                  {(compose.professor_email || 'P').charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-medium uppercase tracking-wide text-gray-400">Replying to</p>
+                  <p className="truncate text-sm font-semibold text-gray-900 dark:text-white">{compose.professor_email}</p>
+                </div>
+                <Badge className="shrink-0 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">Existing thread</Badge>
+              </div>
             </div>
 
-            {/* Editable body — visually identical to preview, just editable */}
-            <div>
-              <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1 block">Reply body</label>
+            {(compose.reply_body || compose.summary) && (
+              <div className="shrink-0 border-b border-gray-100 bg-gray-50/80 px-5 py-3 dark:border-neutral-800 dark:bg-neutral-800/50">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Professor’s latest reply</p>
+                <p className="line-clamp-2 text-xs leading-5 text-gray-600 dark:text-gray-300">{compose.reply_body || compose.summary}</p>
+              </div>
+            )}
+
+            <div className="min-h-0 flex-1 overflow-y-auto bg-white px-5 py-4 dark:bg-neutral-900">
               <div
-                ref={editRef}
+                ref={editorRef}
                 contentEditable
                 suppressContentEditableWarning
-                className="p-3 rounded-lg bg-white border border-gray-100 dark:border-neutral-800 text-gray-700 dark:text-gray-300 whitespace-pre-wrap focus:outline-none"
-                style={{
-                  fontFamily: 'Roboto, sans-serif',
-                  fontSize: '14px',
-                  lineHeight: '1.6',
-                  minHeight: '140px',
-                }}
+                className="min-h-64 text-[14px] leading-6 text-[#202124] outline-none dark:text-gray-100 [&_p]:mb-4"
+                data-placeholder="Write your reply..."
               />
             </div>
 
-            {/* File attachment */}
-            <div className="flex items-center gap-2">
-              <label className="text-[10px] px-2.5 py-1.5 flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-neutral-700 text-muted hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors font-medium cursor-pointer">
-                <Paperclip className="w-3 h-3" /> Attach file
-                <input type="file" className="hidden" onChange={handleFileChange} />
-              </label>
-              {composeFile && (
-                <span className="text-[10px] text-gray-500 truncate max-w-[180px]">{composeFile.name}</span>
-              )}
-            </div>
-
-            {/* Action buttons */}
-            <div className="flex items-center gap-2 pt-2 border-t border-gray-100 dark:border-neutral-800">
-              <button
-                onClick={handleSend}
-                disabled={composeSending}
-                className="text-[11px] px-4 py-2 flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
-              >
-                {composeSending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+            <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-gray-200 bg-gray-50 px-4 py-3 dark:border-neutral-700 dark:bg-neutral-800">
+              <button onClick={sendReply} disabled={working === 'send-reply'} className="inline-flex items-center gap-2 rounded-full bg-[#0b57d0] px-5 py-2 text-xs font-semibold text-white shadow-sm hover:bg-[#0842a0] disabled:opacity-50">
+                {working === 'send-reply' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                 Send
               </button>
-              <button
-                onClick={handleSaveDraft}
-                disabled={composeDrafting}
-                className="text-[11px] px-4 py-2 flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-neutral-700 text-muted font-medium hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors disabled:opacity-50"
-              >
-                {composeDrafting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Edit3 className="w-3.5 h-3.5" />}
-                Save Draft
+              <button onClick={saveLocalDraft} disabled={working === 'save-draft'} className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3.5 py-2 text-[11px] font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-gray-200">
+                <Save className="h-3.5 w-3.5" /> Save draft
               </button>
-              <button onClick={closeCompose} className="text-[11px] px-4 py-2 rounded-lg text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">
-                Cancel
+              <button onClick={saveGmailDraft} disabled={working === 'gmail-draft'} className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3.5 py-2 text-[11px] font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-neutral-600 dark:bg-neutral-900 dark:text-gray-200">
+                <FilePlus2 className="h-3.5 w-3.5" /> Save to Gmail
               </button>
+              {working && working !== 'send-reply' && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
+              <span className="ml-auto hidden text-[10px] text-gray-400 sm:block">Sent inside the same Gmail thread</span>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </section>
   );

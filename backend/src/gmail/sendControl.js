@@ -1,8 +1,9 @@
 import db from '../db/index.js';
 import { delay } from '../pipeline/utils.js';
+import { rescheduleBatchesAfterGmailReset } from '../services/scheduledGmailRecovery.js';
 
-const DEFAULT_QUOTA_PAUSE_HOURS = 24;
 const STALE_RESERVATION_GRACE_MINUTES = 5;
+export const SEND_LIMIT_COOLDOWN_MINUTES = 15;
 
 export class SendPausedError extends Error {
   constructor(message, pausedUntil) {
@@ -16,6 +17,15 @@ export class DailyCapError extends Error {
   constructor(cap) {
     super(`Daily sending cap of ${cap} reached`);
     this.code = 'DAILY_CAP_REACHED';
+  }
+}
+
+export class DuplicateSendError extends Error {
+  constructor(email, prior) {
+    super(`Email already sent to ${email}; duplicate send blocked`);
+    this.code = 'DUPLICATE_SEND_BLOCKED';
+    this.email = email;
+    this.prior = prior || null;
   }
 }
 
@@ -77,9 +87,10 @@ export function getOutboundSendBlock() {
   };
 }
 
-export function pauseOutboundSending(reason, hours = DEFAULT_QUOTA_PAUSE_HOURS) {
-  const duration = Math.max(1, Number(hours) || DEFAULT_QUOTA_PAUSE_HOURS);
-  const pausedUntil = new Date(Date.now() + duration * 60 * 60 * 1000).toISOString();
+export function pauseOutboundSending(reason, retryAt) {
+  const timestamp = retryAt ? new Date(retryAt).getTime() : 0;
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) return null;
+  const pausedUntil = new Date(timestamp).toISOString();
   db.prepare(`
     UPDATE outbound_send_state
     SET paused_until=?, pause_reason=?, updated_at=datetime('now')
@@ -96,7 +107,7 @@ export function clearExpiredSendPause() {
   `).run(new Date().toISOString());
 }
 
-export function recordSendIncident({ type = 'send_limit', reason, messageId, source = 'gmail_api' } = {}) {
+export function recordSendIncident({ type = 'send_limit', reason, messageId, source = 'gmail_api', retryAt } = {}) {
   if (messageId) {
     const existing = db.prepare('SELECT id FROM outbound_send_incidents WHERE message_id=?').get(messageId);
     if (existing) return { id: existing.id, added: false, pausedUntil: getSendPause()?.paused_until || null };
@@ -105,14 +116,30 @@ export function recordSendIncident({ type = 'send_limit', reason, messageId, sou
     INSERT INTO outbound_send_incidents (incident_type, reason, source, message_id)
     VALUES (?, ?, ?, ?)
   `).run(type, reason || type, source, messageId || null);
-  const pausedUntil = type === 'send_limit' ? pauseOutboundSending(reason) : null;
+  const cooldownAt = type === 'send_limit'
+    ? new Date(Date.now() + SEND_LIMIT_COOLDOWN_MINUTES * 60_000).toISOString()
+    : retryAt;
+  const pausedUntil = type === 'send_limit' ? pauseOutboundSending(reason, cooldownAt) : null;
+  if (pausedUntil) rescheduleBatchesAfterGmailReset(pausedUntil, reason || type);
   return { id: info.lastInsertRowid, added: true, pausedUntil };
 }
 
-export async function reserveOutboundSend({ mode = 'instant' } = {}) {
+export async function reserveOutboundSend({ mode = 'instant', recipientEmail, allowDuplicate = false } = {}) {
+  const recipient = String(recipientEmail || '').trim().toLowerCase();
   const reservation = db.transaction(() => {
     clearExpiredSendPause();
     clearStaleReservations();
+
+    if (recipient && !allowDuplicate) {
+      const prior = db.prepare(`
+        SELECT sent_at, subject, message_id, mode, batch_id
+        FROM sent_email_history
+        WHERE lower(professor_email)=?
+        ORDER BY sent_at DESC, id DESC
+        LIMIT 1
+      `).get(recipient);
+      if (prior) throw new DuplicateSendError(recipient, prior);
+    }
 
     const paused = getSendPause();
     if (paused) {
@@ -147,10 +174,18 @@ export async function reserveOutboundSend({ mode = 'instant' } = {}) {
       ? Math.max(1000, randomDelayMs(settings.min_delay_min, settings.max_delay_min))
       : 0;
     const sendAfter = toSqliteUtc(new Date(base + spacingMs));
-    const info = db.prepare(`
-      INSERT INTO outbound_send_reservations (mode, send_after)
-      VALUES (?, ?)
-    `).run(mode, sendAfter);
+    let info;
+    try {
+      info = db.prepare(`
+        INSERT INTO outbound_send_reservations (mode, recipient_email, send_after)
+        VALUES (?, ?, ?)
+      `).run(mode, recipient || null, sendAfter);
+    } catch (error) {
+      if (recipient && String(error?.message || '').includes('outbound_send_reservations.recipient_email')) {
+        throw new DuplicateSendError(recipient);
+      }
+      throw error;
+    }
     return { id: info.lastInsertRowid, sendAfter };
   })();
 
@@ -164,6 +199,19 @@ export async function reserveOutboundSend({ mode = 'instant' } = {}) {
       `${paused.pause_reason || 'Sending paused'} until ${paused.paused_until}`,
       paused.paused_until,
     );
+  }
+  if (recipient && !allowDuplicate) {
+    const prior = db.prepare(`
+      SELECT sent_at, subject, message_id, mode, batch_id
+      FROM sent_email_history
+      WHERE lower(professor_email)=?
+      ORDER BY sent_at DESC, id DESC
+      LIMIT 1
+    `).get(recipient);
+    if (prior) {
+      releaseOutboundSend(reservation.id);
+      throw new DuplicateSendError(recipient, prior);
+    }
   }
   return reservation;
 }

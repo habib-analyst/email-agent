@@ -3,15 +3,19 @@ import { config } from '../config/index.js';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
 import { resolve } from 'path';
 import { encryptJson, decryptJson } from '../utils/secrets.js';
+import { currentTenantKey } from '../db/index.js';
+import { AsyncLocalStorage } from 'async_hooks';
+import { randomBytes } from 'crypto';
 
 const LEGACY_TOKEN_PATH = resolve(import.meta.dirname, '../../.tokens.json');
 const USER_DATA_DIR = resolve(import.meta.dirname, '../../user-data');
 const ACTIVE_USER_PATH = resolve(USER_DATA_DIR, '.active-user');
 const PROFILE_CACHE_MS = 30 * 60 * 1000;
-let profileCache = null;
-let userInfoUnavailable = false;
-let lastProfileLogKey = '';
-let pendingTokens = null;
+const profileCaches = new Map();
+const userInfoUnavailable = new Set();
+const lastProfileLogKeys = new Map();
+const pendingTokenContext = new AsyncLocalStorage();
+const oauthStates = new Map();
 export const SCOPES = [
   'openid',
   'https://www.googleapis.com/auth/userinfo.profile',
@@ -27,6 +31,8 @@ function createOAuth2Client() {
 }
 
 function activeTokenPath() {
+  const tenant = currentTenantKey();
+  if (tenant) return resolve(USER_DATA_DIR, tenant, '.tokens.json');
   try {
     const key = readFileSync(ACTIVE_USER_PATH, 'utf8').trim();
     if (key) return resolve(USER_DATA_DIR, key, '.tokens.json');
@@ -62,7 +68,8 @@ function saveTokens(tokens, path = activeTokenPath()) {
 }
 
 function loadTokens() {
-  if (pendingTokens) return pendingTokens;
+  const pending = pendingTokenContext.getStore();
+  if (pending) return pending;
   const path = activeTokenPath();
   if (!existsSync(path)) return null;
   const raw = readFileSync(path, 'utf8');
@@ -75,7 +82,12 @@ function loadTokens() {
 
 export function getAuthUrl() {
   const client = createOAuth2Client();
-  return client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
+  const state = randomBytes(24).toString('base64url');
+  oauthStates.set(state, Date.now());
+  for (const [key, createdAt] of oauthStates) {
+    if (Date.now() - createdAt > 10 * 60 * 1000) oauthStates.delete(key);
+  }
+  return client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent', state });
 }
 
 /** Parse `"Habib Ur Rehman" <email@...>` → Habib Ur Rehman */
@@ -92,13 +104,14 @@ export function parseDisplayNameFromFromHeader(fromHeader) {
 }
 
 async function fetchNameFromUserInfo(auth) {
-  if (userInfoUnavailable) return null;
+  const tenant = currentTenantKey() || 'anonymous';
+  if (userInfoUnavailable.has(tenant)) return null;
   try {
     const oauth2 = google.oauth2({ version: 'v2', auth });
     const { data } = await oauth2.userinfo.get();
     return data.name?.trim() || null;
   } catch {
-    userInfoUnavailable = true;
+    userInfoUnavailable.add(tenant);
     return null;
   }
 }
@@ -152,12 +165,15 @@ async function fetchNameFromSentMail(gmail) {
 }
 
 export function clearProfileCache() {
-  profileCache = null;
-  userInfoUnavailable = false;
-  lastProfileLogKey = '';
+  const tenant = currentTenantKey() || 'anonymous';
+  profileCaches.delete(tenant);
+  userInfoUnavailable.delete(tenant);
+  lastProfileLogKeys.delete(tenant);
 }
 
 export async function fetchGmailProfile({ force = false } = {}) {
+  const tenant = currentTenantKey() || 'anonymous';
+  const profileCache = profileCaches.get(tenant);
   if (!force && profileCache && Date.now() - profileCache.at < PROFILE_CACHE_MS) {
     return { email: profileCache.email, name: profileCache.name };
   }
@@ -176,11 +192,11 @@ export async function fetchGmailProfile({ force = false } = {}) {
     || (await fetchNameFromSentMail(gmail))
     || null;
 
-  profileCache = { email, name, at: Date.now() };
+  profileCaches.set(tenant, { email, name, at: Date.now() });
 
   const logKey = `${email}|${name || ''}`;
-  if (logKey !== lastProfileLogKey) {
-    lastProfileLogKey = logKey;
+  if (logKey !== lastProfileLogKeys.get(tenant)) {
+    lastProfileLogKeys.set(tenant, logKey);
     if (name) {
       console.log(`[Auth] Gmail display name resolved: "${name}" <${email}>`);
     } else {
@@ -191,22 +207,26 @@ export async function fetchGmailProfile({ force = false } = {}) {
   return { email, name };
 }
 
-export async function handleCallback(code) {
+export async function handleCallback(code, state) {
+  const createdAt = oauthStates.get(String(state || ''));
+  oauthStates.delete(String(state || ''));
+  if (!createdAt || Date.now() - createdAt > 10 * 60 * 1000) {
+    throw new Error('Invalid or expired OAuth state');
+  }
   const client = createOAuth2Client();
   const { tokens } = await client.getToken(code);
-  pendingTokens = tokens;
   return tokens;
 }
 
-export function commitPendingTokens() {
-  if (!pendingTokens) return;
-  saveTokens(pendingTokens);
-  pendingTokens = null;
+export function runWithPendingTokens(tokens, fn) {
+  return pendingTokenContext.run(tokens, fn);
 }
 
-export async function discardPendingTokens() {
-  const tokens = pendingTokens;
-  pendingTokens = null;
+export function commitPendingTokens(tokens) {
+  if (tokens) saveTokens(tokens);
+}
+
+export async function discardPendingTokens(tokens) {
   const token = tokens?.access_token || tokens?.refresh_token;
   if (!token) return;
   try {
@@ -230,7 +250,7 @@ export function getAuthedClient() {
 }
 
 export function isAuthenticated() {
-  if (!pendingTokens && !existsSync(activeTokenPath())) return false;
+  if (!pendingTokenContext.getStore() && !existsSync(activeTokenPath())) return false;
   const tokens = loadTokens();
   return !!tokens && !!tokens.refresh_token;
 }
@@ -272,7 +292,7 @@ export async function validateToken() {
 
 export async function disconnect() {
   const tokenPath = activeTokenPath();
-  if (!pendingTokens && !existsSync(tokenPath)) return;
+  if (!existsSync(tokenPath)) return;
 
   try {
     const tokens = loadTokens();
@@ -285,6 +305,5 @@ export async function disconnect() {
   }
 
   clearProfileCache();
-  pendingTokens = null;
   try { unlinkSync(tokenPath); } catch {}
 }

@@ -19,7 +19,7 @@ export default function ScheduledSendTimePanel({ onSuggestTime, className = '', 
       title="Send time advisor"
       subtitle="Professor time zones and smart send-time suggestions for scheduled batches"
       collapsible
-      defaultOpen
+      defaultOpen={false}
       bodyClassName="p-4"
     >
       {body}

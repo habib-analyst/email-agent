@@ -1,39 +1,12 @@
-import React, { useMemo } from 'react';
-import { FileSpreadsheet, Download, Trash2, Maximize2, Minimize2, Pencil, Save, Radio, CheckCircle2, Loader2, Plus } from 'lucide-react';
-import { post, put } from '../api.js';
-
-const STATE_COLORS = {
-  pending: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  researching: 'bg-blue-100 text-blue-700 dark:bg-neutral-800 dark:text-blue-400',
-  drafted: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
-  verified: 'bg-indigo-100 text-indigo-700 dark:bg-neutral-800 dark:text-indigo-400',
-  awaiting_proceed: 'bg-violet-100 text-violet-700 dark:bg-neutral-800 dark:text-violet-400',
-  sent: 'bg-emerald-100 text-emerald-700 dark:bg-neutral-800 dark:text-emerald-400',
-  needs_web_research: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
-  failed: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  skipped: 'bg-gray-200 text-gray-700 dark:bg-neutral-800 dark:text-gray-400',
-  duplicate_review: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
-  needs_review: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
-};
-
-function StateBadge({ state }) {
-  const cls = STATE_COLORS[state] || 'bg-gray-200 text-gray-700';
-  const live = ['researching', 'drafted', 'verified', 'sending'].includes(state);
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-semibold ${cls}`}>
-      {live && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
-      {state || '-'}
-    </span>
-  );
-}
+import React from 'react';
+import { FileSpreadsheet, Download, Trash2, Maximize2, Minimize2, Pencil, Save, Loader2, Plus } from 'lucide-react';
+import { del, post, put } from '../api.js';
 
 export default function LiveRosterPanel({
   rows,
-  activeEmail,
   onClear,
   onSave,
   mode = 'instant',
-  live = true,
 }) {
   const exportSuffix = mode !== 'instant' ? `?mode=${mode}` : '';
   const exportHref = mode === 'scheduled' || mode === 'basic_scheduled' ? '/api/scheduled/roster.xlsx' : `/api/roster.xlsx${exportSuffix}`;
@@ -42,21 +15,13 @@ export default function LiveRosterPanel({
   const [editData, setEditData] = React.useState(null);
   const [saving, setSaving] = React.useState(false);
 
-  const summary = useMemo(() => {
-    const counts = {};
-    for (const r of rows || []) {
-      const s = r.queue_state || 'pending';
-      counts[s] = (counts[s] || 0) + 1;
-    }
-    return counts;
-  }, [rows]);
-
   const startEdit = () => {
     setEditData((rows || []).map(r => ({
       id: r.id,
       full_name: r.full_name || '',
       last_name: r.last_name || '',
       email: r.email || '',
+      university: r.university || '',
       subject_keyword: r.subject_keyword || '',
       interest_line: r.interest_line || r.research_interest || '',
     })));
@@ -72,6 +37,7 @@ export default function LiveRosterPanel({
         await put(`/professor/${row.id}?mode=${encodeURIComponent(mode)}`, {
           full_name: row.full_name,
           last_name: row.last_name,
+          university: row.university,
           interest_line: row.interest_line,
           subject_keyword: row.subject_keyword,
         });
@@ -89,9 +55,17 @@ export default function LiveRosterPanel({
     if (!email) return;
     const full_name = window.prompt('Full name', '') || '';
     const last_name = window.prompt('Last name', '') || '';
+    const university = window.prompt('University', '') || '';
     const subject_keyword = window.prompt('Subject keyword', '') || '';
     const interest_line = window.prompt('Interest line', '') || '';
-    await post('/roster/add', { email, full_name, last_name, subject_keyword, interest_line, mode });
+    await post('/roster/add', { email, full_name, last_name, university, subject_keyword, interest_line, mode });
+    onSave?.();
+  };
+
+  const handleDeleteRow = async row => {
+    if (!row?.id) return;
+    if (!window.confirm(`Delete ${row.email} from this roster and its unsent processing item?`)) return;
+    await del(`/roster/${row.id}?mode=${encodeURIComponent(mode)}`);
     onSave?.();
   };
 
@@ -108,21 +82,9 @@ export default function LiveRosterPanel({
           <div>
             <h3 className="font-semibold text-sm flex items-center gap-2 text-gray-900 dark:text-gray-100">
               <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-              Live Excel Roster
-              {live && rows?.length > 0 && (
-                <span className="inline-flex items-center gap-1 text-[9px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
-                  <Radio className="w-3 h-3 animate-pulse" /> LIVE
-                </span>
-              )}
+              Imported Excel Roster
             </h3>
-            <p className="text-[10px] text-gray-500 mt-0.5">{rows?.length || 0} rows - auto-filled from uploads</p>
-          </div>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {Object.entries(summary).slice(0, 4).map(([k, v]) => (
-              <span key={k} className="text-[9px] px-2 py-0.5 rounded-lg bg-white/80 dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 font-medium tabular-nums">
-                {v} {k}
-              </span>
-            ))}
+            <p className="text-[10px] text-gray-500 mt-0.5">{rows?.length || 0} user-owned rows · changed only by import, add, edit, or delete</p>
           </div>
         </div>
         <div className="flex items-center gap-2 mt-2 flex-wrap">
@@ -156,23 +118,19 @@ export default function LiveRosterPanel({
                 <th className="px-2 py-2.5 font-semibold">Full Name</th>
                 <th className="px-2 py-2.5 font-semibold">Last Name</th>
                 <th className="px-2 py-2.5 font-semibold">Email</th>
+                <th className="px-2 py-2.5 font-semibold">University</th>
                 <th className="px-2 py-2.5 font-semibold">Subject Keyword</th>
                 <th className="px-2 py-2.5 font-semibold">Interest Line</th>
-                <th className="px-2 py-2.5 font-semibold">Status</th>
+                <th className="px-2 py-2.5 text-center font-semibold">Action</th>
               </tr>
             </thead>
             <tbody>
               {(displayRows || []).slice(0, 300).map((r, i) => {
-                const isActive = !editing && activeEmail && r.email === activeEmail;
-                const isSent = r.queue_state === 'sent';
                 const interestLine = r.interest_line || r.research_interest || '';
                 return (
                   <tr
                     key={r.id || `${r.email}-${i}`}
-                    className={`border-b border-gray-100 dark:border-neutral-800 transition-colors duration-300
-                      ${isActive ? 'bg-blue-50 dark:bg-neutral-800 ring-2 ring-inset ring-blue-400/40' : ''}
-                      ${isSent ? 'bg-emerald-50/30 dark:bg-neutral-800' : i % 2 ? 'bg-gray-50/40 dark:bg-neutral-800/20' : ''}
-                    `}
+                    className={`border-b border-gray-100 dark:border-neutral-800 ${i % 2 ? 'bg-gray-50/40 dark:bg-neutral-800/20' : ''}`}
                   >
                     <td className="px-2 py-2 text-gray-400 tabular-nums">{i + 1}</td>
                     <td className="px-2 py-2 font-medium truncate max-w-[150px]">
@@ -182,13 +140,22 @@ export default function LiveRosterPanel({
                       {editing ? <input className="input text-[11px] py-1 w-full" value={r.last_name} onChange={e => updateEditRow(r.id, 'last_name', e.target.value)} /> : (r.last_name || '-')}
                     </td>
                     <td className="px-2 py-2 text-gray-600 truncate max-w-[190px]">{r.email}</td>
+                    <td className="px-2 py-2 truncate max-w-[180px] text-gray-600">
+                      {editing ? <input className="input text-[11px] py-1 w-full" value={r.university || ''} onChange={e => updateEditRow(r.id, 'university', e.target.value)} /> : (r.university || '-')}
+                    </td>
                     <td className="px-2 py-2 truncate max-w-[140px] text-gray-600">
                       {editing ? <input className="input text-[11px] py-1 w-full" value={r.subject_keyword} onChange={e => updateEditRow(r.id, 'subject_keyword', e.target.value)} /> : (r.subject_keyword || '-')}
                     </td>
                     <td className="px-2 py-2 truncate max-w-[220px] text-gray-500">
                       {editing ? <input className="input text-[11px] py-1 w-full" value={r.interest_line} onChange={e => updateEditRow(r.id, 'interest_line', e.target.value)} /> : (interestLine || '-')}
                     </td>
-                    <td className="px-2 py-2">{!editing ? <StateBadge state={r.queue_state} /> : '-'}</td>
+                    <td className="px-2 py-2 text-center">
+                      {!editing && (
+                        <button type="button" onClick={() => handleDeleteRow(r)} className="rounded-lg p-1.5 text-red-500 transition hover:bg-red-500/10" title="Delete roster row">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -196,11 +163,6 @@ export default function LiveRosterPanel({
           </table>
         )}
       </div>
-      {summary.sent > 0 && (
-        <div className="px-4 py-2 border-t border-emerald-100 dark:border-emerald-900/30 flex items-center gap-2 text-[10px] text-emerald-700 dark:text-emerald-400 bg-emerald-50/50 dark:bg-emerald-950/20">
-          <CheckCircle2 className="w-3.5 h-3.5" /> {summary.sent} sent - sheet synced to exports/professor-roster.xlsx
-        </div>
-      )}
     </div>
   );
 

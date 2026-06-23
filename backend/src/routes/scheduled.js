@@ -128,13 +128,13 @@ router.post('/batch', async (req, res) => {
       professors = professors.slice(0, max_professors);
     }
 
-    const skipDup = skip_duplicates !== false ? 1 : 0;
+    const skipDup = 1;
     let skippedDuplicates = [];
 
     // Deduplicate via permanent archive + session sent logs (default ON)
     if (professors.length) {
       const emailList = professors.map(p => p.email);
-      const { allowed, skipped } = filterDuplicateEmails(emailList, { allowAll: skipDup === 0 });
+      const { allowed, skipped } = filterDuplicateEmails(emailList);
       const allowedSet = new Set(allowed.map(e => e.toLowerCase()));
       professors = professors.filter(p => allowedSet.has(p.email.toLowerCase()));
       skippedDuplicates = skipped;
@@ -191,7 +191,7 @@ router.get('/batches', (req, res) => {
       (SELECT COUNT(*) FROM scheduled_drafts WHERE batch_id=b.id AND status='sent') as sent_count,
       (SELECT COUNT(*) FROM scheduled_drafts WHERE batch_id=b.id AND status='failed') as failed_count,
       (SELECT COUNT(*) FROM scheduled_drafts WHERE batch_id=b.id AND status='needs_web_research') as needs_web_count
-    FROM scheduled_batches b WHERE b.status != 'cancelled' ORDER BY b.created_at DESC LIMIT 50
+    FROM scheduled_batches b WHERE b.status != 'cancelled' ORDER BY b.created_at DESC
   `).all();
   res.json(batches);
 });
@@ -247,8 +247,21 @@ router.put('/batch/:id/reschedule', (req, res) => {
     return res.status(400).json({ error: 'Cannot reschedule a ' + batch.status + ' batch' });
   }
   db.prepare(`
+    INSERT INTO scheduled_batch_history
+      (batch_id, action, from_status, to_status, scheduled_at, gmail_reset_at, detail)
+    VALUES (?, 'manual_reschedule', ?, ?, ?, ?, ?)
+  `).run(
+    batch.id,
+    batch.status,
+    batch.status,
+    scheduled_at,
+    batch.gmail_reset_at || null,
+    `Changed from ${batch.scheduled_at || 'not scheduled'}`,
+  );
+  db.prepare(`
     UPDATE scheduled_batches
-    SET scheduled_at=?, send_attempts=0, ready_notice_sent_at=NULL, manual_due_notified_at=NULL
+    SET scheduled_at=?, gmail_reset_at=NULL, gmail_retry_at=NULL,
+        send_attempts=0, ready_notice_sent_at=NULL, manual_due_notified_at=NULL
     WHERE id=?
   `).run(scheduled_at, req.params.id);
   const isDueNow = new Date(scheduled_at).getTime() <= Date.now();
@@ -267,6 +280,67 @@ router.put('/batch/:id/reschedule', (req, res) => {
   }
   eventBus.publish({ type: 'scheduled_batch_rescheduled', mode: 'scheduled', batchId: batch.id, scheduled_at });
   res.json({ success: true, scheduled_at });
+});
+
+router.get('/batch/:id/details', (req, res) => {
+  const batch = db.prepare('SELECT * FROM scheduled_batches WHERE id=?').get(req.params.id);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  const counts = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN status IN ('sent','resent') THEN 1 ELSE 0 END) AS sent,
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status NOT IN ('sent','resent','cancelled') THEN 1 ELSE 0 END) AS remaining
+    FROM scheduled_drafts WHERE batch_id=?
+  `).get(batch.id);
+  const replies = db.prepare(`
+    SELECT COUNT(DISTINCT r.id) AS count
+    FROM replies r
+    JOIN scheduled_professors sp ON lower(sp.email)=lower(r.professor_email)
+    WHERE sp.batch_id=?
+  `).get(batch.id)?.count || 0;
+  let history = db.prepare(`
+    SELECT id, action, from_status, to_status, scheduled_at, gmail_reset_at, detail, created_at
+    FROM scheduled_batch_history WHERE batch_id=? ORDER BY id DESC
+  `).all(batch.id);
+  const seenHistory = new Set();
+  history = history.filter(row => {
+    const detail = String(row.detail || '').replace(/\s+/g, ' ').trim();
+    const key = [
+      row.action || '',
+      row.from_status || '',
+      row.to_status || '',
+      row.scheduled_at || '',
+      row.gmail_reset_at || '',
+      detail,
+    ].join('|');
+    if (seenHistory.has(key)) return false;
+    seenHistory.add(key);
+    return true;
+  });
+  if (!history.length) {
+    history = [{
+      id: 0,
+      action: 'batch_created',
+      from_status: null,
+      to_status: batch.status,
+      scheduled_at: batch.scheduled_at,
+      gmail_reset_at: batch.gmail_reset_at,
+      detail: 'Original batch schedule',
+      created_at: batch.created_at,
+    }];
+  }
+  res.json({
+    batch,
+    counts: {
+      total: Number(counts.total) || 0,
+      sent: Number(counts.sent) || 0,
+      remaining: Number(counts.remaining) || 0,
+      failed: Number(counts.failed) || 0,
+      replies: Number(replies) || 0,
+    },
+    history,
+  });
 });
 
 // Force-send all overdue auto-approved batches sequentially.
@@ -897,7 +971,9 @@ function buildScheduledRosterRows() {
 }
 
 router.get('/roster', (req, res) => {
-  const rows = readRosterExcel().map((r, index) => ({
+  const databaseRows = buildScheduledRosterRows();
+  const sourceRows = databaseRows.length ? databaseRows : readRosterExcel();
+  const rows = sourceRows.map((r, index) => ({
     id: r.id || index + 1,
     batch_id: r.batch_id || '',
     batch_mode: r.batch_mode || 'scheduled',

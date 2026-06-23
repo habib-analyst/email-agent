@@ -11,13 +11,13 @@ const stableSubscribe = eventStream.subscribe.bind(eventStream);
  * Central SSE hub — all pages subscribe here instead of opening their own EventSource.
  */
 export function EventStreamProvider({ children }) {
-  const { backendReachable } = useSession();
+  const { auth, backendReachable } = useSession();
   const [connected, setConnected] = useState(false);
 
   const value = useMemo(() => ({ connected, subscribe: stableSubscribe }), [connected]);
 
   useEffect(() => {
-    if (!backendReachable) {
+    if (!backendReachable || !auth?.authenticated) {
       eventStream.disconnect();
       setConnected(false);
       return undefined;
@@ -30,7 +30,7 @@ export function EventStreamProvider({ children }) {
     });
     setConnected(eventStream.isConnected());
     return () => { unsub(); eventStream.disconnect(); };
-  }, [backendReachable]);
+  }, [auth?.authenticated, backendReachable]);
 
   return (
     <EventStreamContext.Provider value={value}>

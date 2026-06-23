@@ -2,25 +2,37 @@ import React, { useEffect, useState } from 'react';
 import { Play, Loader2, Clock } from 'lucide-react';
 import { post, get } from '../api.js';
 import { useToast } from './Toast.jsx';
+import { useEventStream } from '../core/EventStreamProvider.jsx';
 
 /** One-click run batch + ETA progress. */
 export default function RunBatchBar({ mode = 'instant', onStarted, className = '' }) {
   const toast = useToast();
+  const { connected, subscribe } = useEventStream();
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null);
+  const [loadError, setLoadError] = useState('');
 
   const loadProgress = async () => {
     try {
       const p = await get(`/queue/progress?mode=${mode}`);
       setProgress(p);
-    } catch { /* ignore */ }
+      setLoadError('');
+    } catch (error) {
+      setLoadError(error.message || 'Progress could not refresh');
+    }
   };
 
   useEffect(() => {
     loadProgress();
-    const id = setInterval(loadProgress, 8000);
+    if (connected) return undefined;
+    const id = setInterval(loadProgress, 30000);
     return () => clearInterval(id);
-  }, [mode]);
+  }, [mode, connected]);
+
+  useEffect(() => subscribe(event => {
+    if (event.mode && event.mode !== mode) return;
+    if (['progress', 'state_change', 'sent', 'send_limit_reached'].includes(event.type)) loadProgress();
+  }), [mode, subscribe]);
 
   const runBatch = async () => {
     setRunning(true);
@@ -36,7 +48,7 @@ export default function RunBatchBar({ mode = 'instant', onStarted, className = '
     }
   };
 
-  if (!progress && !running) return null;
+  if (!progress && !running && !loadError) return null;
 
   return (
     <div className={`flex flex-wrap items-center gap-2 p-2.5 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-neutral-800 ${className}`}>
@@ -60,6 +72,11 @@ export default function RunBatchBar({ mode = 'instant', onStarted, className = '
           )}
           {progress.complete && ' · Complete'}
         </span>
+      )}
+      {loadError && (
+        <button type="button" onClick={loadProgress} className="text-[10px] font-semibold text-red-600 hover:underline">
+          {loadError} · Retry
+        </button>
       )}
     </div>
   );

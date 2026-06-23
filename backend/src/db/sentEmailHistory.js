@@ -1,6 +1,7 @@
 import db from './index.js';
 import archiveDb from './archive.js';
 import { invalidateUniversityOutreachCache } from '../learning/universityOutreach.js';
+import { resolveUsaUniversityFromEmail } from '../learning/usaUniversityResolver.js';
 
 export function normalizeSentEmail(email) {
   return (email || '').toLowerCase().trim();
@@ -22,6 +23,7 @@ export function recordSentEmail({
 } = {}) {
   const email = normalizeSentEmail(professor_email);
   if (!email) return null;
+  const resolvedUniversity = resolveUsaUniversityFromEmail(email) || university || null;
 
   const sentAt = sent_at || new Date().toISOString();
   const existingByMessage = message_id
@@ -49,7 +51,7 @@ export function recordSentEmail({
   `).run(
     email,
     last_name || null,
-    university || null,
+    resolvedUniversity,
     subject || null,
     message_id || null,
     sentAt,
@@ -125,6 +127,20 @@ function backfillSentEmailHistory() {
     )
     WHERE university IS NULL OR university = ''
   `).run();
+
+  const usaHistory = db.prepare(`
+    SELECT id, professor_email, university
+    FROM sent_email_history
+    WHERE lower(professor_email) LIKE '%.edu'
+  `).all();
+  const updateUniversity = db.prepare('UPDATE sent_email_history SET university=? WHERE id=?');
+  const reconcileUsaUniversities = db.transaction((rows) => {
+    for (const row of rows) {
+      const resolved = resolveUsaUniversityFromEmail(row.professor_email);
+      if (resolved && resolved !== row.university) updateUniversity.run(resolved, row.id);
+    }
+  });
+  reconcileUsaUniversities(usaHistory);
 
   const after = db.prepare('SELECT COUNT(*) as c FROM sent_email_history').get().c;
   if (after > before) {

@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { resolve } from 'path';
 import { readdirSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { createHash } from 'crypto';
+import { AsyncLocalStorage } from 'async_hooks';
 
 const LEGACY_DB_PATH = resolve(import.meta.dirname, '../../data.db');
 const USER_DATA_DIR = resolve(import.meta.dirname, '../../user-data');
@@ -33,14 +34,82 @@ function openDatabase(path) {
   return connection;
 }
 
+function ensureTenantRuntimeSchema(connection) {
+  connection.exec(`
+    CREATE TABLE IF NOT EXISTS instant_queue_groups (
+      id INTEGER PRIMARY KEY,
+      queue_number INTEGER NOT NULL,
+      mode TEXT NOT NULL,
+      source TEXT DEFAULT 'import',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      closed_at DATETIME,
+      UNIQUE(mode, queue_number)
+    );
+    CREATE TABLE IF NOT EXISTS outbound_send_state (
+      id INTEGER PRIMARY KEY CHECK(id=1),
+      paused_until DATETIME,
+      pause_reason TEXT,
+      last_send_at DATETIME,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS outbound_send_reservations (
+      id INTEGER PRIMARY KEY,
+      mode TEXT,
+      send_after DATETIME NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS outbound_send_incidents (
+      id INTEGER PRIMARY KEY,
+      incident_type TEXT NOT NULL,
+      reason TEXT,
+      source TEXT,
+      message_id TEXT,
+      received_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_incident_message
+      ON outbound_send_incidents(message_id)
+      WHERE message_id IS NOT NULL AND message_id != '';
+  `);
+  try { connection.exec("ALTER TABLE queue ADD COLUMN auto_send_requested INTEGER"); } catch {}
+  try { connection.exec("ALTER TABLE queue ADD COLUMN queue_group_id INTEGER"); } catch {}
+  try { connection.exec("CREATE INDEX IF NOT EXISTS idx_queue_group ON queue(queue_group_id)"); } catch {}
+  for (const mode of ['instant', 'basic_instant']) {
+    const existingGroup = connection.prepare('SELECT id FROM instant_queue_groups WHERE mode=? ORDER BY queue_number DESC LIMIT 1').get(mode);
+    const ungrouped = connection.prepare('SELECT COUNT(*) AS c FROM queue WHERE mode=? AND queue_group_id IS NULL').get(mode)?.c || 0;
+    if (!existingGroup && ungrouped > 0) {
+      const group = connection.prepare('INSERT INTO instant_queue_groups (queue_number, mode, source) VALUES (1, ?, ?)').run(mode, 'legacy_migration');
+      connection.prepare('UPDATE queue SET queue_group_id=? WHERE mode=? AND queue_group_id IS NULL').run(group.lastInsertRowid, mode);
+    } else if (existingGroup && ungrouped > 0) {
+      connection.prepare('UPDATE queue SET queue_group_id=? WHERE mode=? AND queue_group_id IS NULL').run(existingGroup.id, mode);
+    }
+    connection.prepare(`
+      UPDATE instant_queue_groups
+      SET created_at=COALESCE((
+        SELECT MIN(COALESCE(q.research_started_at, q.drafted_at, q.verified_at, q.sent_at))
+        FROM queue q WHERE q.queue_group_id=instant_queue_groups.id
+      ), created_at)
+      WHERE mode=? AND source='legacy_migration'
+    `).run(mode);
+  }
+  connection.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
+}
+
 let activeTenantKey = readActiveTenantKey();
 let activeDbPath = activeTenantKey ? tenantDbPath(activeTenantKey) : LEGACY_DB_PATH;
 let activeDb = openDatabase(activeDbPath);
+ensureTenantRuntimeSchema(activeDb);
+const tenantContext = new AsyncLocalStorage();
+const tenantConnections = new Map(activeTenantKey ? [[activeTenantKey, activeDb]] : []);
+
+function contextualDatabase() {
+  return tenantContext.getStore()?.db || activeDb;
+}
 
 const db = new Proxy({}, {
   get(_target, property) {
-    const value = activeDb[property];
-    return typeof value === 'function' ? value.bind(activeDb) : value;
+    const connection = contextualDatabase();
+    const value = connection[property];
+    return typeof value === 'function' ? value.bind(connection) : value;
   },
 });
 
@@ -75,6 +144,59 @@ function seedEmptyWorkspace(connection, email) {
   connection.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
 }
 
+function connectionForTenantKey(key) {
+  if (!key) return activeDb;
+  if (tenantConnections.has(key)) {
+    const existing = tenantConnections.get(key);
+    ensureTenantRuntimeSchema(existing);
+    return existing;
+  }
+  const path = tenantDbPath(key);
+  if (!existsSync(path)) throw new Error(`Tenant workspace does not exist: ${key}`);
+  const connection = openDatabase(path);
+  ensureTenantRuntimeSchema(connection);
+  tenantConnections.set(key, connection);
+  return connection;
+}
+
+export function runWithTenantKey(key, fn) {
+  const connection = connectionForTenantKey(key);
+  return tenantContext.run({ key, path: tenantDbPath(key), db: connection }, fn);
+}
+
+export function currentTenantKey() {
+  return tenantContext.getStore()?.key || activeTenantKey || null;
+}
+
+export async function ensureUserWorkspace(email, { migrateLegacy = false } = {}) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) throw new Error('Cannot create user workspace without an email address');
+  const key = tenantKey(normalized);
+  const targetPath = tenantDbPath(key);
+  const targetExists = existsSync(targetPath);
+  if (!targetExists && migrateLegacy && activeDbPath === LEGACY_DB_PATH) {
+    mkdirSync(resolve(targetPath, '..'), { recursive: true });
+    activeDb.pragma('wal_checkpoint(FULL)');
+    await activeDb.backup(targetPath);
+  } else if (!targetExists) {
+    const source = contextualDatabase();
+    const statements = schemaStatements(source);
+    const fresh = openDatabase(targetPath);
+    try {
+      fresh.transaction(() => {
+        for (const sql of statements) fresh.exec(sql);
+        seedEmptyWorkspace(fresh, normalized);
+      })();
+    } finally {
+      fresh.close();
+    }
+  }
+  const connection = connectionForTenantKey(key);
+  connection.prepare('INSERT OR IGNORE INTO outbound_send_state (id) VALUES (1)').run();
+  connection.prepare('UPDATE settings SET sender_email=? WHERE id=1').run(normalized);
+  return { key, path: targetPath, created: !targetExists };
+}
+
 export async function activateUserWorkspace(email, { migrateLegacy = false } = {}) {
   const normalized = String(email || '').trim().toLowerCase();
   if (!normalized) throw new Error('Cannot activate user workspace without an email address');
@@ -86,26 +208,12 @@ export async function activateUserWorkspace(email, { migrateLegacy = false } = {
     return { key, path: targetPath, created: false };
   }
 
-  const targetExists = existsSync(targetPath);
-  if (!targetExists && migrateLegacy && activeDbPath === LEGACY_DB_PATH) {
-    mkdirSync(resolve(targetPath, '..'), { recursive: true });
-    activeDb.pragma('wal_checkpoint(FULL)');
-    await activeDb.backup(targetPath);
-  } else if (!targetExists) {
-    const statements = schemaStatements(activeDb);
-    const fresh = openDatabase(targetPath);
-    try {
-      fresh.transaction(() => {
-        for (const sql of statements) fresh.exec(sql);
-        seedEmptyWorkspace(fresh, normalized);
-      })();
-    } finally {
-      fresh.close();
-    }
-  }
+  const ensured = await ensureUserWorkspace(normalized, { migrateLegacy });
+  const targetExists = !ensured.created;
 
   const previous = activeDb;
   const next = openDatabase(targetPath);
+  tenantConnections.set(key, next);
   activeDb = next;
   activeDbPath = targetPath;
   activeTenantKey = key;
@@ -142,7 +250,10 @@ export async function activateAnonymousWorkspace() {
 }
 
 export function getActiveWorkspace() {
-  return { key: activeTenantKey, path: activeDbPath };
+  const context = tenantContext.getStore();
+  return context
+    ? { key: context.key, path: context.path }
+    : { key: activeTenantKey, path: activeDbPath };
 }
 
 db.exec(`
@@ -175,6 +286,18 @@ CREATE TABLE IF NOT EXISTS queue (
   drafted_at DATETIME,
   verified_at DATETIME,
   mode TEXT DEFAULT 'instant'
+  ,auto_send_requested INTEGER
+  ,queue_group_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS instant_queue_groups (
+  id INTEGER PRIMARY KEY,
+  queue_number INTEGER NOT NULL,
+  mode TEXT NOT NULL,
+  source TEXT DEFAULT 'import',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  closed_at DATETIME,
+  UNIQUE(mode, queue_number)
 );
 
 CREATE TABLE IF NOT EXISTS sent_log (
@@ -207,6 +330,18 @@ CREATE TABLE IF NOT EXISTS sent_email_history (
   draft_id INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS university_locations (
+  normalized_name TEXT PRIMARY KEY,
+  university_name TEXT NOT NULL,
+  country_id TEXT NOT NULL,
+  country_name TEXT,
+  subdivision TEXT,
+  source TEXT NOT NULL DEFAULT 'catalog',
+  confidence REAL DEFAULT 1,
+  source_url TEXT,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS replies (
   id INTEGER PRIMARY KEY,
   thread_id TEXT,
@@ -214,6 +349,19 @@ CREATE TABLE IF NOT EXISTS replies (
   classification TEXT,
   summary TEXT,
   received_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS reply_scenarios (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  subject_template TEXT DEFAULT 'Re: {{ORIGINAL_SUBJECT}}',
+  body_template TEXT NOT NULL,
+  active INTEGER DEFAULT 1,
+  built_in INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS delivery_failures (
@@ -232,8 +380,20 @@ CREATE TABLE IF NOT EXISTS delivery_failures (
   inquiry_status TEXT DEFAULT 'not_checked',
   inquiry_summary TEXT,
   inquiry_checked_at DATETIME,
-  status TEXT DEFAULT 'open',
+  status TEXT DEFAULT 'pending',
   received_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_batch_history (
+  id INTEGER PRIMARY KEY,
+  batch_id INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  from_status TEXT,
+  to_status TEXT,
+  scheduled_at DATETIME,
+  gmail_reset_at DATETIME,
+  detail TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS outbound_send_state (
@@ -247,6 +407,7 @@ CREATE TABLE IF NOT EXISTS outbound_send_state (
 CREATE TABLE IF NOT EXISTS outbound_send_reservations (
   id INTEGER PRIMARY KEY,
   mode TEXT,
+  recipient_email TEXT,
   send_after DATETIME NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -360,6 +521,7 @@ CREATE TABLE IF NOT EXISTS scheduled_drafts (
 CREATE INDEX IF NOT EXISTS idx_queue_state ON queue(state);
 CREATE INDEX IF NOT EXISTS idx_queue_scheduled ON queue(scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_queue_professor_id ON queue(professor_id);
+CREATE INDEX IF NOT EXISTS idx_queue_group ON queue(queue_group_id);
 CREATE INDEX IF NOT EXISTS idx_sent_log_email ON sent_log(professor_email);
 CREATE INDEX IF NOT EXISTS idx_sent_log_sent_at ON sent_log(sent_at);
 CREATE INDEX IF NOT EXISTS idx_sent_log_email_mode ON sent_log(professor_email, mode);
@@ -606,6 +768,9 @@ function alterTableSilent(sql) {
 alterTableSilent("ALTER TABLE queue ADD COLUMN mode TEXT DEFAULT 'instant'");
 alterTableSilent("ALTER TABLE queue ADD COLUMN custom_html TEXT");
 alterTableSilent("ALTER TABLE queue ADD COLUMN duplicate_override INTEGER DEFAULT 0");
+alterTableSilent("ALTER TABLE queue ADD COLUMN auto_send_requested INTEGER");
+alterTableSilent("ALTER TABLE queue ADD COLUMN queue_group_id INTEGER");
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_queue_group ON queue(queue_group_id)"); } catch {}
 alterTableSilent("ALTER TABLE professors ADD COLUMN mode TEXT DEFAULT 'instant'");
 alterTableSilent("ALTER TABLE professors ADD COLUMN verified_name TEXT");
 alterTableSilent("ALTER TABLE professors ADD COLUMN name_source TEXT");
@@ -624,12 +789,141 @@ alterTableSilent("ALTER TABLE replies ADD COLUMN original_subject TEXT");
 alterTableSilent("ALTER TABLE replies ADD COLUMN reply_body TEXT");
 alterTableSilent("ALTER TABLE replies ADD COLUMN gmail_message_id TEXT");
 alterTableSilent("ALTER TABLE replies ADD COLUMN analyzed_at DATETIME");
+alterTableSilent("ALTER TABLE replies ADD COLUMN scenario_id INTEGER");
+alterTableSilent("ALTER TABLE replies ADD COLUMN scenario_confidence REAL");
+alterTableSilent("ALTER TABLE replies ADD COLUMN workflow_status TEXT DEFAULT 'new'");
+alterTableSilent("ALTER TABLE replies ADD COLUMN replied_by_user INTEGER DEFAULT 0");
+alterTableSilent("ALTER TABLE replies ADD COLUMN reply_sent_at DATETIME");
+alterTableSilent("ALTER TABLE replies ADD COLUMN sent_message_id TEXT");
+alterTableSilent("ALTER TABLE replies ADD COLUMN gmail_draft_id TEXT");
+alterTableSilent("ALTER TABLE replies ADD COLUMN rejected_at DATETIME");
+alterTableSilent("ALTER TABLE replies ADD COLUMN original_resent_at DATETIME");
+alterTableSilent("ALTER TABLE replies ADD COLUMN original_resent_message_id TEXT");
 try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_replies_gmail_message ON replies(gmail_message_id) WHERE gmail_message_id IS NOT NULL"); } catch {}
 alterTableSilent("ALTER TABLE delivery_failures ADD COLUMN status TEXT DEFAULT 'open'");
+alterTableSilent("ALTER TABLE delivery_failures ADD COLUMN resent_at DATETIME");
+alterTableSilent("ALTER TABLE delivery_failures ADD COLUMN resent_message_id TEXT");
+alterTableSilent("ALTER TABLE delivery_failures ADD COLUMN rejected_at DATETIME");
+alterTableSilent("ALTER TABLE scheduled_batches ADD COLUMN gmail_reset_at DATETIME");
+alterTableSilent("ALTER TABLE scheduled_batches ADD COLUMN gmail_retry_at DATETIME");
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_batch_history_batch ON scheduled_batch_history(batch_id, id DESC)"); } catch {}
+db.prepare(`
+  UPDATE scheduled_batches
+  SET gmail_retry_at=scheduled_at,
+      gmail_reset_at=datetime(scheduled_at, '-2 minutes')
+  WHERE gmail_retry_at IS NULL
+    AND id IN (
+      SELECT DISTINCT batch_id FROM scheduled_drafts
+      WHERE status='approved' AND (
+        lower(COALESCE(error,'')) LIKE '%rate limit%'
+        OR lower(COALESCE(error,'')) LIKE '%sending limit%'
+        OR lower(COALESCE(error,'')) LIKE '%limit exceeded%'
+      )
+    )
+`).run();
+db.prepare("UPDATE delivery_failures SET status='pending' WHERE status='open' OR status IS NULL").run();
+db.prepare("UPDATE replies SET workflow_status=CASE WHEN reply_sent=1 THEN 'sent' ELSE 'new' END WHERE workflow_status IS NULL OR workflow_status=''").run();
+alterTableSilent("ALTER TABLE outbound_send_reservations ADD COLUMN recipient_email TEXT");
+try {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_send_reservations_recipient
+    ON outbound_send_reservations(recipient_email)
+    WHERE recipient_email IS NOT NULL AND recipient_email != ''
+  `);
+} catch {}
+db.prepare(`
+  DELETE FROM delivery_failures
+  WHERE message_id IS NOT NULL AND message_id != ''
+    AND id NOT IN (
+      SELECT MIN(id)
+      FROM delivery_failures
+      WHERE message_id IS NOT NULL AND message_id != ''
+      GROUP BY message_id, professor_email
+    )
+`).run();
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_failures_message_recipient
+  ON delivery_failures(message_id, professor_email)
+  WHERE message_id IS NOT NULL AND message_id != ''
+`);
 alterTableSilent("ALTER TABLE template ADD COLUMN mode TEXT");
 try { db.exec("CREATE INDEX idx_queue_mode ON queue(mode)"); } catch {}
 try { db.exec("CREATE INDEX idx_professors_mode ON professors(mode)"); } catch {}
 try { db.exec("CREATE INDEX idx_sent_log_mode ON sent_log(mode)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_replies_scenario ON replies(scenario_id, received_at DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_replies_thread ON replies(thread_id, received_at DESC)"); } catch {}
+
+const DEFAULT_REPLY_SCENARIOS = [
+  {
+    name: 'No Searches / No Hiring This Year',
+    description: 'The professor is not searching for students or hiring this year.',
+    body: `Dear Professor [Last Name],
+
+Thank you for letting me know. Could you kindly let me know when you plan to hire again? I would be glad to send you my updated resume for your review at that time. I remain confident in my ability to contribute meaningfully to your research.
+
+Best regards,
+Habib Ur Rehman`,
+  },
+  {
+    name: 'No Funding',
+    description: 'The professor or lab currently has no funding.',
+    body: `Dear Professor [Last Name],
+
+Thank you for your response. I understand the funding situation. Please do remember me if any opportunity opens up in the future. I remain confident that my background and skills would be a strong fit for your lab.
+
+Best regards,
+Habib Ur Rehman`,
+  },
+  {
+    name: 'Retiring / Leaving Academia',
+    description: 'The professor is retiring, retired, or leaving academia.',
+    body: `Dear Professor [Last Name],
+
+Thank you for the update. I wish you all the best in your retirement and future endeavors.
+
+Best regards,
+Habib Ur Rehman`,
+  },
+  {
+    name: 'Self-Funding Required',
+    description: 'The opportunity requires the student to provide their own funding.',
+    body: `Dear Professor [Last Name],
+
+Thank you for your response. I understand, but I am unable to self-fund at this time. Please do remember me if any funded opportunity becomes available in the future. I remain confident I can contribute meaningfully to your work.
+
+Best regards,
+Habib Ur Rehman`,
+  },
+  {
+    name: 'Direct to University Application (No Lab Position)',
+    description: 'The professor asks the student to apply through the university rather than offering a lab position.',
+    body: `Dear Professor [Last Name],
+
+Thank you for letting me know. I will start the university application process and choose you as my primary supervisor. I am confident that working under your guidance would be a great opportunity, and I look forward to contributing meaningfully to your lab.
+
+Best regards,
+Habib Ur Rehman`,
+  },
+  {
+    name: 'No Lab Space',
+    description: 'The professor has no physical or available lab space.',
+    body: `Dear Professor [Last Name],
+
+Thank you for letting me know. Could you kindly let me know when you plan to hire again? I would be glad to send you my updated resume for your review at that time. I remain confident in my ability to contribute meaningfully to your research.
+
+Best regards,
+Habib Ur Rehman`,
+  },
+];
+
+const insertReplyScenario = db.prepare(`
+  INSERT OR IGNORE INTO reply_scenarios
+    (name, description, subject_template, body_template, active, built_in, sort_order)
+  VALUES (?, ?, 'Re: {{ORIGINAL_SUBJECT}}', ?, 1, 1, ?)
+`);
+DEFAULT_REPLY_SCENARIOS.forEach((scenario, index) => {
+  insertReplyScenario.run(scenario.name, scenario.description, scenario.body, index + 1);
+});
 // Migrate template table: remove CHECK(id=1) to allow multiple rows (one per mode)
 try {
   const hasScheduledTpl = db.prepare("SELECT id FROM template WHERE mode='scheduled'").get();

@@ -5,6 +5,7 @@ import { performWebSearch, WEB_SEARCH_TOOL } from './webSearch.js';
 import { delay } from '../pipeline/utils.js';
 import { NAME_RULES_PROMPT } from '../prompts/nameRules.js';
 import { normalizeInterestLineKeywords } from '../utils/interestLine.js';
+import { currentTenantKey } from '../db/index.js';
 
 function safeParseJSON(text) {
   if (!text) throw new Error('AI returned empty response');
@@ -55,21 +56,26 @@ function safeParseJSON(text) {
 }
 
 // ── Model rotation state + token tracking ────────────────────────
-let geminiComboIndex = 0;
-let qwenComboIndex = 0;  // Unified rotation index across all qwen sources
-const modelTokenUsage = {};       // { 'qwen3.7-plus@qwen1': 123456, 'qwen3.7-plus@qwen2': 456789, ... }
-const reasoningTokenUsage = {};   // { 'qwq-plus@qwen1': 5000, ... } — tracks thinking tokens separately
+const tenantAiStates = new Map();
 const MODEL_TOKEN_LIMIT = 1_000_000;  // 1M per model per API
 
-// Track API usage for monitoring
-const apiCallStats = {};
-config.qwenSources.forEach(s => { apiCallStats[s.source] = 0; });
-config.geminiSources.forEach(s => { apiCallStats[s.source] = 0; });
-apiCallStats.openai = 0;
+function aiState() {
+  const tenant = currentTenantKey() || 'anonymous';
+  if (!tenantAiStates.has(tenant)) {
+    tenantAiStates.set(tenant, {
+      geminiComboIndex: 0,
+      qwenComboIndex: 0,
+      modelTokenUsage: {},
+      reasoningTokenUsage: {},
+      apiCallStats: { openai: 0 },
+    });
+  }
+  return tenantAiStates.get(tenant);
+}
 
 function isModelExhausted(model, source) {
   const key = source ? `${model}@${source}` : model;
-  const used = modelTokenUsage[key] || 0;
+  const used = aiState().modelTokenUsage[key] || 0;
   if (used >= MODEL_TOKEN_LIMIT) {
     console.log(`[Tokens] ${key} exhausted (${used}/${MODEL_TOKEN_LIMIT}) — skipping`);
     return true;
@@ -84,21 +90,21 @@ function trackTokenUsage(usage, source) {
   const reasoning = usage.reasoning_tokens || 0;
   const key = source ? `${model}@${source}` : model;
   if (model) {
-    modelTokenUsage[key] = (modelTokenUsage[key] || 0) + total;
+    const state = aiState();
+    state.modelTokenUsage[key] = (state.modelTokenUsage[key] || 0) + total;
     if (reasoning > 0) {
-      reasoningTokenUsage[key] = (reasoningTokenUsage[key] || 0) + reasoning;
+      state.reasoningTokenUsage[key] = (state.reasoningTokenUsage[key] || 0) + reasoning;
       console.log(`[Tokens] ${key}: reasoning=${reasoning}, total=${total}`);
     }
   }
 }
 
-export function getTokenUsage() { return { output: { ...modelTokenUsage }, reasoning: { ...reasoningTokenUsage } }; }
+export function getTokenUsage() {
+  const state = aiState();
+  return { output: { ...state.modelTokenUsage }, reasoning: { ...state.reasoningTokenUsage } };
+}
 export function resetTokenUsage() {
-  for (const k in modelTokenUsage) modelTokenUsage[k] = 0;
-  for (const k in reasoningTokenUsage) reasoningTokenUsage[k] = 0;
-  config.qwenSources.forEach(s => { apiCallStats[s.source] = 0; });
-  config.geminiSources.forEach(s => { apiCallStats[s.source] = 0; });
-  apiCallStats.openai = 0;
+  tenantAiStates.delete(currentTenantKey() || 'anonymous');
 }
 
 // Get total available tokens across all Qwen APIs
@@ -108,6 +114,7 @@ export function getTotalQwenTokens() {
 
 // Get API usage statistics
 export function getApiStats() {
+  const apiCallStats = aiState().apiCallStats;
   const qwenTotal = config.qwenSources.reduce((sum, s) => sum + (apiCallStats[s.source] || 0), 0);
   const geminiTotal = config.geminiSources.reduce((sum, s) => sum + (apiCallStats[s.source] || 0), 0);
   return {
@@ -146,7 +153,7 @@ async function callGemini(prompt, preferredModel, timeout, options = {}) {
     const idx = combos.findIndex(c => c.model === preferredModel);
     if (idx >= 0) startIdx = idx;
   } else {
-    startIdx = geminiComboIndex % combos.length;
+    startIdx = aiState().geminiComboIndex % combos.length;
   }
 
   for (let i = 0; i < combos.length; i++) {
@@ -169,7 +176,8 @@ async function callGemini(prompt, preferredModel, timeout, options = {}) {
         { contents: [{ role: 'user', parts: [{ text: prompt }] }] },
         { timeout }
       );
-      geminiComboIndex = idx + 1;  // advance rotation on success
+      aiState().geminiComboIndex = idx + 1;  // advance rotation on success
+      const apiCallStats = aiState().apiCallStats;
       apiCallStats[geminiSource] = (apiCallStats[geminiSource] || 0) + 1;
       // Track token usage from Gemini response
       const geminiUsage = result.response?.usageMetadata;
@@ -230,7 +238,7 @@ async function callQwen(prompt, preferredModel, timeout, options = {}) {
     const idx = filteredCombos.findIndex(c => c.model === preferredModel);
     if (idx >= 0) startIdx = idx;
   } else {
-    startIdx = qwenComboIndex % filteredCombos.length;
+    startIdx = aiState().qwenComboIndex % filteredCombos.length;
   }
 
   for (let i = 0; i < filteredCombos.length; i++) {
@@ -271,7 +279,7 @@ async function callQwen(prompt, preferredModel, timeout, options = {}) {
         });
 
         // Update rotation index and track usage
-        qwenComboIndex = idx + 1;  // Next call starts from next combo in pool
+        aiState().qwenComboIndex = idx + 1;  // Next call starts from next combo in pool
         const usage = res.data.usage || {};
         // Track reasoning_tokens from thinking models separately
         if (usage.completion_tokens_details?.reasoning_tokens) {
@@ -279,10 +287,11 @@ async function callQwen(prompt, preferredModel, timeout, options = {}) {
         } else {
           trackTokenUsage(usage, combo.source);
         }
+        const apiCallStats = aiState().apiCallStats;
         apiCallStats[combo.source] = (apiCallStats[combo.source] || 0) + 1;
 
         const tokenKey = `${combo.model}@${combo.source}`;
-        const used = modelTokenUsage[tokenKey] || 0;
+        const used = aiState().modelTokenUsage[tokenKey] || 0;
 
         const choice = res.data.choices[0];
         const message = choice.message;
@@ -380,6 +389,7 @@ async function callOpenAI(prompt, timeout) {
     headers: { Authorization: `Bearer ${config.openaiApiKey}` },
     timeout,
   });
+  const apiCallStats = aiState().apiCallStats;
   apiCallStats.openai = (apiCallStats.openai || 0) + 1;
   // Track token usage from OpenAI response
   if (res.data.usage) {
@@ -1014,8 +1024,27 @@ JSON:{"pass":true/false,"reasons":["reason if fail"]}`;
   return await callAI(prompt, 'heavy');
 }
 
-export async function classifyReply(body) {
-  const prompt = `Classify reply:\n${body}\nJSON:{"classification":"positive/negative/auto_reply/other","summary":"one line"}`;
+export async function classifyReply(body, scenarios = []) {
+  const scenarioList = scenarios.map(s => ({
+    id: s.id,
+    name: s.name,
+    description: s.description || '',
+  }));
+  const prompt = `Analyze this professor email reply accurately.
+Reply:
+${body}
+
+Active reply scenarios:
+${JSON.stringify(scenarioList)}
+
+Rules:
+- classification must be positive, negative, auto_reply, or other.
+- auto_reply includes out-of-office, leave, vacation, and automated acknowledgements.
+- Only select a scenario when the email clearly matches it.
+- If uncertain, scenario_id must be null and confidence must be below 0.75.
+- Do not invent facts.
+
+JSON:{"classification":"positive/negative/auto_reply/other","summary":"one line","scenario_id":null,"scenario_confidence":0.0}`;
   return await callAI(prompt, 'light');
 }
 

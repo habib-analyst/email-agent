@@ -2,14 +2,16 @@ import { google } from 'googleapis';
 import { getAuthedClient, fetchGmailProfile } from '../auth/index.js';
 import { readFileSync } from 'fs';
 import { basename, extname } from 'path';
-import db from '../db/index.js';
+import db, { currentTenantKey } from '../db/index.js';
 import { recordSentEmail } from '../db/sentEmailHistory.js';
 import { formatGreetingLastName } from '../utils/professor.js';
 import { normalizeInterestLineKeywords } from '../utils/interestLine.js';
-import { getSenderIdentity } from '../services/senderIdentity.js';
+import { getSenderIdentity, requireSenderIdentity } from '../services/senderIdentity.js';
 import { config } from '../config/index.js';
+import { eventBus } from '../core/EventBus.js';
 import {
   completeOutboundSend,
+  DuplicateSendError,
   recordSendIncident,
   releaseOutboundSend,
   reserveOutboundSend,
@@ -17,6 +19,16 @@ import {
 
 let _authRetries = 0;
 const MAX_AUTH_RETRIES = 1;
+
+function publishSentHistoryUpdated({ email, mode, messageId }) {
+  eventBus.publish({
+    type: 'sent_history_updated',
+    professor: email,
+    mode,
+    messageId: messageId || null,
+    at: new Date().toISOString(),
+  });
+}
 
 function getGmail(forceRefresh = false) {
   const auth = getAuthedClient();
@@ -41,6 +53,26 @@ export function isSendLimitError(e) {
     || msg.includes('too many requests')
     || msg.includes('rate limit')
     || msg.includes('daily limit');
+}
+
+export function getSendLimitRetryAt(error) {
+  const message = String(error?.message || '');
+  const timestampMatch = message.match(/retry after\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/i);
+  if (timestampMatch) {
+    const parsed = new Date(timestampMatch[1]);
+    if (Number.isFinite(parsed.getTime()) && parsed.getTime() > Date.now()) return parsed.toISOString();
+  }
+
+  const retryAfter = error?.response?.headers?.['retry-after'];
+  if (retryAfter != null) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return new Date(Date.now() + seconds * 1000).toISOString();
+    }
+    const parsed = new Date(retryAfter);
+    if (Number.isFinite(parsed.getTime()) && parsed.getTime() > Date.now()) return parsed.toISOString();
+  }
+  return null;
 }
 
 function formatFrom(email, displayName) {
@@ -92,8 +124,12 @@ function buildMime(fromEmail, fromName, to, subject, html, attachmentPath) {
   return Buffer.from(parts.join('\r\n')).toString('base64url');
 }
 
-function buildReplyMime(fromEmail, fromName, to, subject, html, attachmentPath) {
+function buildReplyMime(fromEmail, fromName, to, subject, html, attachmentPath, replyHeaders = {}) {
   const from = formatFrom(fromEmail, fromName);
+  const threadHeaders = [
+    replyHeaders.inReplyTo ? `In-Reply-To: ${replyHeaders.inReplyTo}` : null,
+    replyHeaders.references ? `References: ${replyHeaders.references}` : null,
+  ].filter(Boolean);
   if (!attachmentPath) {
     // Simple HTML-only email
     const parts = [
@@ -101,6 +137,7 @@ function buildReplyMime(fromEmail, fromName, to, subject, html, attachmentPath) 
       `From: ${from}`,
       `To: ${to}`,
       `Subject: ${subject}`,
+      ...threadHeaders,
       `Content-Type: text/html; charset="UTF-8"`,
       `Content-Transfer-Encoding: 7bit`,
       ``,
@@ -118,6 +155,7 @@ function buildReplyMime(fromEmail, fromName, to, subject, html, attachmentPath) 
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
+    ...threadHeaders,
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     ``,
     `--${boundary}`,
@@ -136,13 +174,13 @@ function buildReplyMime(fromEmail, fromName, to, subject, html, attachmentPath) 
   return Buffer.from(parts.join('\r\n')).toString('base64url');
 }
 
-export async function sendReplyEmail({ to, subject, html, attachmentPath }) {
+export async function sendReplyEmail({ to, subject, html, attachmentPath, threadId, replyHeaders }) {
   const sender = config.dryRunSend
     ? getSenderIdentity()
     : requireSenderIdentity();
   const email = sender.email || config.senderEmail || 'dry-run@example.local';
   const name = sender.name || config.senderName || 'Dry Run Sender';
-  const raw = buildReplyMime(email, name, to, subject, html, attachmentPath);
+  const raw = buildReplyMime(email, name, to, subject, html, attachmentPath, replyHeaders);
   if (config.dryRunSend) {
     console.log(`[Gmail:DryRun] Would send reply to ${to}: ${subject}`);
     return { id: `dry-run-reply-${Date.now()}`, dryRun: true, rawSize: raw.length };
@@ -151,7 +189,10 @@ export async function sendReplyEmail({ to, subject, html, attachmentPath }) {
   for (let authAttempt = 0; authAttempt <= MAX_AUTH_RETRIES; authAttempt++) {
     try {
       const gmail = getGmail(authAttempt > 0);
-      const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+      const res = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw, ...(threadId ? { threadId } : {}) },
+      });
       _authRetries = 0;
       try {
         recordSentEmail({
@@ -161,6 +202,7 @@ export async function sendReplyEmail({ to, subject, html, attachmentPath }) {
           mode: 'reply',
           source: 'gmail_reply',
         });
+        publishSentHistoryUpdated({ email: to, mode: 'reply', messageId: res.data?.id });
         completeOutboundSend(reservation.id);
       } catch (persistError) {
         console.error('[Gmail:Reply] Sent successfully but local history update failed:', persistError.message);
@@ -174,10 +216,37 @@ export async function sendReplyEmail({ to, subject, html, attachmentPath }) {
         continue;
       }
       releaseOutboundSend(reservation.id);
-      if (isSendLimitError(e)) recordSendIncident({ type: 'send_limit', reason: e.message, source: 'gmail_api' });
+      if (isSendLimitError(e)) {
+        recordSendIncident({
+          type: 'send_limit',
+          reason: e.message,
+          source: 'gmail_api',
+          retryAt: getSendLimitRetryAt(e),
+        });
+      }
       throw e;
     }
   }
+}
+
+export async function createReplyDraft({ to, subject, html, attachmentPath, threadId, replyHeaders }) {
+  const sender = config.dryRunSend
+    ? getSenderIdentity()
+    : requireSenderIdentity();
+  const email = sender.email || config.senderEmail || 'dry-run@example.local';
+  const name = sender.name || config.senderName || 'Dry Run Sender';
+  const raw = buildReplyMime(email, name, to, subject, html, attachmentPath, replyHeaders);
+  if (config.dryRunSend) {
+    return { id: `dry-run-draft-${Date.now()}`, message: { threadId }, dryRun: true };
+  }
+  const gmail = getGmail();
+  const response = await gmail.users.drafts.create({
+    userId: 'me',
+    requestBody: {
+      message: { raw, ...(threadId ? { threadId } : {}) },
+    },
+  });
+  return response.data;
 }
 
 export async function sendEmail(item) {
@@ -193,6 +262,14 @@ export async function sendEmail(item) {
     prof = db.prepare('SELECT email, last_name, university FROM professors WHERE id=?').get(item.professor_id);
   }
   if (!prof) throw new Error(`Professor ${item.professor_id} not found in ${itemMode} table`);
+  const priorSend = db.prepare(`
+    SELECT sent_at, subject, message_id, mode, batch_id
+    FROM sent_email_history
+    WHERE lower(professor_email)=lower(?)
+    ORDER BY sent_at DESC, id DESC
+    LIMIT 1
+  `).get(prof.email);
+  if (priorSend && !item.confirmedFailureResend) throw new DuplicateSendError(prof.email, priorSend);
 
   // Use custom_html if the user edited the email body, otherwise build from template
   let html;
@@ -264,10 +341,15 @@ export async function sendEmail(item) {
       batch_id: item.batch_id,
       draft_id: item.draft_id,
     });
+    publishSentHistoryUpdated({ email: prof.email, mode: itemMode, messageId: result.id });
     return result;
   }
 
-  const reservation = await reserveOutboundSend({ mode: itemMode });
+  const reservation = await reserveOutboundSend({
+    mode: itemMode,
+    recipientEmail: prof.email,
+    allowDuplicate: item.confirmedFailureResend === true,
+  });
   // Try sending with auth refresh on auth errors
   for (let authAttempt = 0; authAttempt <= MAX_AUTH_RETRIES; authAttempt++) {
     try {
@@ -288,6 +370,7 @@ export async function sendEmail(item) {
           batch_id: item.batch_id,
           draft_id: item.draft_id,
         });
+        publishSentHistoryUpdated({ email: prof.email, mode: itemMode, messageId: res.data?.id });
         completeOutboundSend(reservation.id);
       } catch (persistError) {
         console.error('[Gmail] Sent successfully but local history update failed:', persistError.message);
@@ -301,16 +384,25 @@ export async function sendEmail(item) {
         continue;
       }
       releaseOutboundSend(reservation.id);
-      if (isSendLimitError(e)) recordSendIncident({ type: 'send_limit', reason: e.message, source: 'gmail_api' });
+      if (isSendLimitError(e)) {
+        recordSendIncident({
+          type: 'send_limit',
+          reason: e.message,
+          source: 'gmail_api',
+          retryAt: getSendLimitRetryAt(e),
+        });
+      }
       throw e;
     }
   }
 }
 
-let sentListCache = { data: null, ts: 0 };
-let latestHtmlCache = { html: null, ts: 0 };
+const sentListCaches = new Map();
+const latestHtmlCaches = new Map();
 
 export async function listSentEmails(maxResults = 15) {
+  const tenant = currentTenantKey() || 'anonymous';
+  const sentListCache = sentListCaches.get(tenant) || { data: null, ts: 0 };
   if (sentListCache.data && Date.now() - sentListCache.ts < 15000) return sentListCache.data;
 
   const gmail = getGmail();
@@ -330,13 +422,14 @@ export async function listSentEmails(maxResults = 15) {
     } catch { return null; }
   }));
   const result = emails.filter(Boolean);
-  sentListCache = { data: result, ts: Date.now() };
+  sentListCaches.set(tenant, { data: result, ts: Date.now() });
   return result;
 }
 
 export function clearGmailCache() {
-  latestHtmlCache = { html: null, ts: 0 };
-  sentListCache = { data: null, ts: 0 };
+  const tenant = currentTenantKey() || 'anonymous';
+  latestHtmlCaches.delete(tenant);
+  sentListCaches.delete(tenant);
 }
 
 export async function searchSentByRecipient(recipient) {
@@ -347,13 +440,15 @@ export async function searchSentByRecipient(recipient) {
 }
 
 export async function getLatestSentHtml(force = false) {
+  const tenant = currentTenantKey() || 'anonymous';
+  const latestHtmlCache = latestHtmlCaches.get(tenant) || { html: null, ts: 0 };
   if (!force && latestHtmlCache.html && Date.now() - latestHtmlCache.ts < 30000) return latestHtmlCache.html;
 
   const gmail = getGmail();
   const list = await gmail.users.messages.list({ userId: 'me', labelIds: ['SENT'], maxResults: 1 });
   if (!list.data.messages?.length) return null;
   const html = await getEmailHtml(list.data.messages[0].id);
-  latestHtmlCache = { html, ts: Date.now() };
+  latestHtmlCaches.set(tenant, { html, ts: Date.now() });
   return html;
 }
 
@@ -363,6 +458,40 @@ export async function getEmailHtml(messageId) {
   const part = findHtmlPart(msg.data.payload);
   if (!part) return null;
   return Buffer.from(part.body.data, 'base64url').toString('utf8');
+}
+
+export async function getSentEmailSnapshot(messageId) {
+  const gmail = getGmail();
+  const response = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+  const part = findHtmlPart(response.data.payload);
+  const headers = response.data.payload?.headers || [];
+  const header = name => headers.find(item => item.name?.toLowerCase() === name)?.value || '';
+  return {
+    html: part?.body?.data ? Buffer.from(part.body.data, 'base64url').toString('utf8') : null,
+    threadId: response.data.threadId || null,
+    internalDate: response.data.internalDate ? new Date(Number(response.data.internalDate)).toISOString() : null,
+    from: header('from'),
+    to: header('to'),
+    subject: header('subject'),
+  };
+}
+
+export async function getMessageReplyHeaders(messageId) {
+  if (!messageId) return {};
+  const gmail = getGmail();
+  const response = await gmail.users.messages.get({
+    userId: 'me',
+    id: messageId,
+    format: 'metadata',
+    metadataHeaders: ['Message-ID', 'References'],
+  });
+  const headers = response.data.payload?.headers || [];
+  const messageIdHeader = headers.find(item => item.name?.toLowerCase() === 'message-id')?.value || '';
+  const references = headers.find(item => item.name?.toLowerCase() === 'references')?.value || '';
+  return {
+    inReplyTo: messageIdHeader,
+    references: [references, messageIdHeader].filter(Boolean).join(' ').trim(),
+  };
 }
 
 function findHtmlPart(payload) {

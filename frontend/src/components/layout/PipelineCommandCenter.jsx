@@ -16,6 +16,7 @@ export default function PipelineCommandCenter({
   scrapeProgress,
   stopped,
   queueFooter,
+  openSignal = 0,
   className = '',
 }) {
   return (
@@ -23,11 +24,12 @@ export default function PipelineCommandCenter({
       className={className}
       icon={Bot}
       title="Live pipeline"
-      subtitle="Single & batch share this pipeline — Import → Research → Draft → Verify → Send"
+      subtitle="Agent workspace — Import → Research → Draft → Verify → Send"
       collapsible
       defaultOpen
       bodyClassName="p-0"
       noPadding
+      openSignal={openSignal}
     >
       <div className="p-4">
         <AgentActivityPanel

@@ -22,6 +22,8 @@ import { evaluateDuplicate } from '../db/duplicatePolicy.js';
 import { autoStartBatchQueue } from '../services/batchRunner.js';
 import { writeRosterExcelFromImport, upsertRosterRow } from '../learning/rosterExcel.js';
 import { buildOutreachSubject, buildBasicOutreachSubject, getBasicSubjectMode } from '../gmail/basicTemplate.js';
+import { resolveRosterUniversityLocations } from '../learning/universityLocationResolver.js';
+import { createInstantQueueGroup, removeEmptyInstantQueueGroup } from '../services/instantQueueGroups.js';
 
 const require = createRequire(import.meta.url);
 const pdf = require('pdf-parse');
@@ -88,6 +90,8 @@ function rosterDossierFromEntry(entry) {
     last_name,
     name: full_name || last_name,
     university: entry.university || universityFromEmail(entry.email),
+    university_country: entry.university_country || null,
+    university_state: entry.university_state || null,
     research_areas,
     papers: [],
     profile_url: entry.profile_url || '',
@@ -110,13 +114,6 @@ function rosterDossierFromEntry(entry) {
   };
 }
 
-function canSkipResearch(entry) {
-  const hasKeywords = !!(entry.subject_keyword?.trim() && (entry.interest_line?.trim() || entry.research_interest?.trim()));
-  const hasInterestOnly = !!(entry.research_interest?.trim() && entry.last_name?.length >= 2);
-  const hasPartialKeywords = !!(entry.subject_keyword?.trim() || entry.interest_line?.trim());
-  return hasKeywords || hasInterestOnly || hasPartialKeywords;
-}
-
 async function parseFile(filePath, ext) {
   let emails = [];
   let preview = null;
@@ -131,6 +128,7 @@ async function parseFile(filePath, ext) {
     }
 
     const { entries, hasStructuredColumns } = parseSpreadsheetRows(allRows);
+    await resolveRosterUniversityLocations(entries);
     rosterEntries = rosterEntries || entries;
 
     if (!rosterEntries.length) {
@@ -299,10 +297,11 @@ function applyRosterQueueFields(queueId, row, mode = 'instant') {
   db.prepare(`UPDATE queue SET ${updates.join(', ')} WHERE id=?`).run(...vals);
 }
 
-async function insertEmails(emailsOrEntries, mode = 'instant') {
+async function insertEmails(emailsOrEntries, mode = 'instant', queueGroupId = null) {
   const settings = db.prepare('SELECT * FROM settings WHERE id=1').get() || {};
   const isEntryObjects = emailsOrEntries?.length && typeof emailsOrEntries[0] === 'object';
   const entries = isEntryObjects ? emailsOrEntries : emailsOrEntries.map(e => ({ email: e, last_name: null }));
+  if (isEntryObjects) await resolveRosterUniversityLocations(entries);
   const emails = entries.map(e => e.email);
 
   const RESEARCH_BATCH = 10;
@@ -315,7 +314,7 @@ async function insertEmails(emailsOrEntries, mode = 'instant') {
       batch.map(async (entry) => {
         const email = entry.email;
 
-        if (canSkipResearch(entry)) {
+        if (isEntryObjects) {
           const dossier = rosterDossierFromEntry(entry);
           if (!dossier.subject_keyword || !dossier.interest_line) {
             const fromProfile = keywordsFromProfileOnly(dossier);
@@ -394,7 +393,7 @@ async function insertEmails(emailsOrEntries, mode = 'instant') {
   const isSingle = emails.length === 1;
   const initialState = isSingle ? 'awaiting_proceed' : 'pending';
   const insert = db.prepare('INSERT OR IGNORE INTO professors (email, last_name, university, research_areas, dossier, mode, name_verified) VALUES (?,?,?,?,?,?,?)');
-  const insertQueue = db.prepare('INSERT INTO queue (professor_id, state, mode) VALUES (?,?,?)');
+  const insertQueue = db.prepare('INSERT INTO queue (professor_id, state, mode, queue_group_id) VALUES (?,?,?,?)');
   const BLOCKED_STATES = ['sent', 'researching', 'drafted', 'verified', 'sending'];
   let added = 0;
   let skipped = 0;
@@ -434,8 +433,8 @@ async function insertEmails(emailsOrEntries, mode = 'instant') {
 
     const dup = evaluateDuplicate(p.email, settings);
 
-    const queued = db.prepare('SELECT id, state, error FROM queue WHERE professor_id=? ORDER BY id DESC LIMIT 1').get(profId);
-    if (queued) {
+    const queued = db.prepare('SELECT id, state, error, queue_group_id FROM queue WHERE professor_id=? AND mode=? ORDER BY id DESC LIMIT 1').get(profId, mode);
+    if (queued && (!queueGroupId || Number(queued.queue_group_id) === Number(queueGroupId))) {
       // Don't re-queue items that are already sent or in a terminal/active state
       if (BLOCKED_STATES.includes(queued.state) || queued.state === 'skipped' && queued.error === 'duplicate_skipped') {
         skipped++;
@@ -464,12 +463,15 @@ async function insertEmails(emailsOrEntries, mode = 'instant') {
     }
 
     if (dup.blocked && dup.action === 'skip') {
+      const qInfo = insertQueue.run(profId, 'skipped', mode, queueGroupId);
+      db.prepare("UPDATE queue SET error='duplicate_skipped' WHERE id=?").run(qInfo.lastInsertRowid);
+      queueIds.push(qInfo.lastInsertRowid);
       skipped++;
       continue;
     }
 
     if (dup.blocked && dup.action === 'review') {
-      const qInfo = insertQueue.run(profId, 'duplicate_review', mode);
+      const qInfo = insertQueue.run(profId, 'duplicate_review', mode, queueGroupId);
       db.prepare("UPDATE queue SET error=? WHERE id=?").run(`duplicate_sent:${dup.prior?.sent_at}:${dup.prior?.subject || ''}`, qInfo.lastInsertRowid);
       recordDuplicateBlocked(p.email, dup.prior, { mode, queue_id: qInfo.lastInsertRowid });
       added++;
@@ -477,7 +479,7 @@ async function insertEmails(emailsOrEntries, mode = 'instant') {
     }
 
     const queueState = isSingle ? initialState : (p.queueState || initialState);
-    const qInfo = insertQueue.run(profId, queueState, mode);
+    const qInfo = insertQueue.run(profId, queueState, mode, queueGroupId);
     if (queueState === 'needs_web_research') {
       db.prepare("UPDATE queue SET error=? WHERE id=?").run('No research found — use Web Search', qInfo.lastInsertRowid);
     }
@@ -506,7 +508,7 @@ router.post('/upload/preview', upload.single('file'), async (req, res) => {
     const result = await parseFile(req.file.path, ext);
     if (result.error) return res.status(400).json({ error: result.error });
     if (result.rosterEntries?.length) {
-      writeRosterExcelFromImport(result.rosterEntries);
+      writeRosterExcelFromImport(result.rosterEntries, req.body?.mode || 'instant');
     }
     res.json({ ...result.preview, emails: result.emails, rosterEntries: result.rosterEntries, filename: req.file.originalname });
   } catch (e) {
@@ -531,7 +533,7 @@ router.post('/upload/roster', (req, res) => {
   try {
     const { rosterEntries } = req.body;
     if (!rosterEntries?.length) return res.status(400).json({ error: 'rosterEntries array required' });
-    const rows = writeRosterExcelFromImport(rosterEntries);
+    const rows = writeRosterExcelFromImport(rosterEntries, req.body?.mode || 'instant');
     res.json({ ok: true, count: rows.length });
   } catch (e) {
     console.error('[Upload/Roster] Error:', e.message);
@@ -540,16 +542,22 @@ router.post('/upload/roster', (req, res) => {
 });
 
 router.post('/upload/confirm', async (req, res) => {
+  let queueGroup = null;
   try {
-    const { emails, rosterEntries, mode, max_professors, auto_start } = req.body;
+    const { emails, rosterEntries, mode, max_professors, auto_start, approval_mode } = req.body;
     const payload = rosterEntries?.length ? rosterEntries : emails;
     if (!payload || !Array.isArray(payload)) return res.status(400).json({ error: 'emails or rosterEntries array required' });
+    if (approval_mode === 'auto' || approval_mode === 'manual') {
+      db.prepare('UPDATE settings SET approval_mode=?, auto_send=? WHERE id=1')
+        .run(approval_mode, approval_mode === 'auto' ? 1 : 0);
+    }
     const limited = max_professors ? payload.slice(0, max_professors) : payload;
     const isEntries = typeof limited[0] === 'object';
-    if (isEntries) writeRosterExcelFromImport(limited);
-    const result = await insertEmails(limited, mode || 'instant');
+    if (isEntries) writeRosterExcelFromImport(limited, mode || 'instant');
+    queueGroup = createInstantQueueGroup(mode || 'instant', 'file_import');
+    const result = await insertEmails(limited, mode || 'instant', queueGroup.id);
     let autoStart = { autoStarted: false, templateLoaded: false };
-    if ((result.added > 0 && !result.isSingle) || auto_start) {
+    if (result.added > 0 || auto_start) {
       const ids = result.isSingle && result.singleQueueId ? [result.singleQueueId] : result.queueIds;
       autoStart = await autoStartBatchQueue(ids, 'file_import', mode || 'instant');
     }
@@ -558,11 +566,13 @@ router.post('/upload/confirm', async (req, res) => {
       skipped: result.skipped,
       total: limited.length,
       singleQueueId: result.singleQueueId,
-      awaitingProceed: result.awaitingProceed,
+      awaitingProceed: result.awaitingProceed && !autoStart.autoStarted,
       autoStarted: autoStart.autoStarted,
       templateLoaded: autoStart.templateLoaded,
+      queue: queueGroup,
     });
   } catch (e) {
+    if (queueGroup?.id) removeEmptyInstantQueueGroup(queueGroup.id);
     console.error('[Upload/Confirm] Error:', e.message);
     res.status(500).json({ error: e.message || 'Upload confirm failed' });
   }
@@ -571,14 +581,17 @@ router.post('/upload/confirm', async (req, res) => {
 router.post('/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const ext = req.file.originalname.split('.').pop().toLowerCase();
+  let queueGroup = null;
 
   try {
     const parsed = await parseFile(req.file.path, ext);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
-    const inserted = await insertEmails(parsed.emails, req.body.mode || 'instant');
+    queueGroup = createInstantQueueGroup(req.body.mode || 'instant', 'file_import');
+    const inserted = await insertEmails(parsed.emails, req.body.mode || 'instant', queueGroup.id);
     let autoStart = { autoStarted: false, templateLoaded: false };
-    if (inserted.added > 0 && !inserted.isSingle) {
-      autoStart = await autoStartBatchQueue(inserted.queueIds, 'file_import', req.body.mode || 'instant');
+    if (inserted.added > 0) {
+      const ids = inserted.isSingle && inserted.singleQueueId ? [inserted.singleQueueId] : inserted.queueIds;
+      autoStart = await autoStartBatchQueue(ids, 'file_import', req.body.mode || 'instant');
     }
     res.json({
       added: inserted.added,
@@ -587,8 +600,10 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       emails: parsed.emails,
       autoStarted: autoStart.autoStarted,
       templateLoaded: autoStart.templateLoaded,
+      queue: queueGroup,
     });
   } catch (e) {
+    if (queueGroup?.id) removeEmptyInstantQueueGroup(queueGroup.id);
     console.error('[Upload] Error:', e.message);
     res.status(500).json({ error: e.message });
   } finally {

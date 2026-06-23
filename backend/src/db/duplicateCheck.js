@@ -92,8 +92,6 @@ export function filterDuplicateEmails(emails, { allowAll = false, settings } = {
     .map(normalizeEmail)
     .filter(Boolean);
 
-  if (allowAll) return { allowed: [...new Set(list)], skipped: [] };
-
   const dupSettings = settings || getDuplicateSettings();
   const allowed = [];
   const skipped = [];

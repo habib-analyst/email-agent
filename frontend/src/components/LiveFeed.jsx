@@ -57,7 +57,10 @@ export default function LiveFeed({ events, connected, embedded = false }) {
           </span>
         </div>
       )}
-      <div className="flex-1 overflow-auto p-2 space-y-0.5 min-h-[280px] max-h-[400px]">
+      <div className={embedded
+        ? 'min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain p-2'
+        : 'min-h-[280px] max-h-[400px] flex-1 space-y-0.5 overflow-auto p-2'
+      }>
         {events.length === 0 && (
           <div className="flex flex-col items-center justify-center py-12 text-center px-4">
             <Activity className="w-8 h-8 text-gray-200 dark:text-gray-700 mb-2" />

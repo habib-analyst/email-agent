@@ -1,4 +1,4 @@
-import db from '../db/index.js';
+import db, { currentTenantKey } from '../db/index.js';
 import { findPriorOutreach, recordDuplicateBlocked } from '../db/duplicateCheck.js';
 import { evaluateDuplicate } from '../db/duplicatePolicy.js';
 import { ArchiveService } from '../services/ArchiveService.js';
@@ -17,17 +17,29 @@ import { repairBasicInstantTemplate } from '../db/templateStore.js';
 import { basicTemplateNeedsRepair, buildBasicOutreachSubject, buildOutreachSubject, getBasicSubjectMode, DEFAULT_SUBJECT_KEYWORD } from '../gmail/basicTemplate.js';
 
 // Debounced roster sync — only write Excel after 5s of no new sends, not per-send
-let rosterSyncTimer = null;
-function debouncedRosterSync(mode = 'instant') {
-  clearTimeout(rosterSyncTimer);
-  rosterSyncTimer = setTimeout(() => { syncRosterFromDb(mode); rosterSyncTimer = null; }, 5000);
+const runtimeStates = new Map();
+
+function runtimeState() {
+  const tenant = currentTenantKey() || 'anonymous';
+  if (!runtimeStates.has(tenant)) {
+    runtimeStates.set(tenant, {
+      rosterSyncTimer: null,
+      shouldRun: false,
+      activeWorkers: 0,
+      lastActivity: Date.now(),
+      preferredQueueId: null,
+      lastHealAt: 0,
+    });
+  }
+  return runtimeStates.get(tenant);
 }
 
-let shouldRun = false;
-let activeWorkers = 0;
-let lastActivity = Date.now();
-let preferredQueueId = null;
-let lastHealAt = 0;
+function debouncedRosterSync(mode = 'instant') {
+  const state = runtimeState();
+  clearTimeout(state.rosterSyncTimer);
+  state.rosterSyncTimer = setTimeout(() => { syncRosterFromDb(mode); state.rosterSyncTimer = null; }, 5000);
+}
+
 const HEAL_INTERVAL_MS = 30000;
 const STUCK_THRESHOLD_MIN = 30;
 
@@ -40,11 +52,12 @@ const STEP_LABELS = {
 };
 
 export function getWorkerStatus() {
+  const state = runtimeState();
   const settings = getSettings();
   return {
-    running: shouldRun,
-    activeWorkers,
-    lastActivity,
+    running: state.shouldRun,
+    activeWorkers: state.activeWorkers,
+    lastActivity: state.lastActivity,
     queueWorkers: Number(settings?.queue_workers) || 2,
     sendingBlock: getOutboundSendBlock(),
   };
@@ -53,9 +66,10 @@ export { eventBus };
 
 // ── Self-healing: recover stuck queue items ──────────────────────────
 function healStuckItems() {
+  const state = runtimeState();
   const now = Date.now();
-  if (now - lastHealAt < HEAL_INTERVAL_MS) return;
-  lastHealAt = now;
+  if (now - state.lastHealAt < HEAL_INTERVAL_MS) return;
+  state.lastHealAt = now;
 
   // Reset items stuck in intermediate states for > STUCK_THRESHOLD_MIN
   const stuck = db.prepare(`
@@ -97,7 +111,7 @@ function healStuckItems() {
 }
 
 export function prioritizeQueue(id) {
-  preferredQueueId = Number(id) || null;
+  runtimeState().preferredQueueId = Number(id) || null;
 }
 
 function publishStep(stage, item, extra = {}) {
@@ -163,8 +177,6 @@ function buildPreviewHtml(rawHtml, lastName, interestLine, stripInterest) {
 }
 
 function getNext() {
-  if (getOutboundSendBlock()) return null;
-
   const baseSql = `
     SELECT q.*, p.email as prof_email, p.last_name as prof_last_name, p.source_url
     FROM queue q
@@ -182,15 +194,16 @@ function getNext() {
     return item;
   });
 
-  if (preferredQueueId) {
+  const runtime = runtimeState();
+  if (runtime.preferredQueueId) {
     const preferred = db.transaction((id) => {
       const item = db.prepare(`${baseSql} AND q.id=? LIMIT 1`).get(id);
       if (!item) return null;
       const updated = db.prepare("UPDATE queue SET state='researching', research_started_at=datetime('now') WHERE id=? AND state IN ('pending','needs_review')").run(item.id);
       if (updated.changes === 0) return null;
       return item;
-    })(preferredQueueId);
-    preferredQueueId = null;
+    })(runtime.preferredQueueId);
+    runtime.preferredQueueId = null;
     if (preferred) return preferred;
   }
 
@@ -215,8 +228,13 @@ function updateState(id, state, data = {}) {
   }
   vals.push(id);
   db.prepare(`UPDATE queue SET ${sets.join(',')} WHERE id=?`).run(...vals);
-  const modeRow = db.prepare('SELECT mode FROM queue WHERE id=?').get(id);
-  eventBus.publish({ type: 'state_change', id, state, mode: modeRow?.mode || 'instant', ...data });
+  const row = db.prepare(`
+    SELECT q.mode, p.email AS professor
+    FROM queue q
+    LEFT JOIN professors p ON p.id=q.professor_id
+    WHERE q.id=?
+  `).get(id);
+  eventBus.publish({ type: 'state_change', id, state, mode: row?.mode || 'instant', professor: row?.professor, ...data });
 }
 
 function isDupe(email) {
@@ -288,6 +306,7 @@ function normalizeBasicSubject(sampleSubject) {
 }
 
 function shouldSendAfterDraft(settings, item) {
+  if (item?.auto_send_requested != null) return Number(item.auto_send_requested) === 1;
   const approvalMode = settings?.approval_mode || 'manual';
   return approvalMode === 'auto' && !!settings.auto_send;
 }
@@ -312,6 +331,7 @@ async function sendFastTrackedDraft(item, prof, tplRow, loopEpoch) {
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sending');
+  updateState(item.id, 'sending');
   try {
     const sendResult = await sendEmail({
       ...item,
@@ -351,12 +371,13 @@ async function sendFastTrackedDraft(item, prof, tplRow, loopEpoch) {
     publishStep('sent', item, { subject, messageId: sendResult.id });
     publishCompose(item, prof, subject, interestLine, previewHtml, 'sent');
     eventBus.publish({ type: 'sent', professor: prof.email, subject, messageId: sendResult.id, id: item.id, mode: itemMode });
-    lastActivity = Date.now();
+    runtimeState().lastActivity = Date.now();
     ArchiveService.cacheDossier(prof.email, storedDossier, { mode: itemMode, queue_id: item.id });
     tryAutoAdvanceNext(itemMode, item.id);
     console.log(`[Worker] Fast-track approved send to ${prof.email} — ${subject}`);
     return true;
   } catch (e) {
+    if (isOutboundSendBlockedError(e) || isSendLimitError(e)) throw e;
     console.error(`[Worker] Fast-track approved send failed for ${prof.email}:`, e.message);
     updateState(item.id, 'failed', { error: e.message });
     publishStep('failed', item, { label: `Send failed: ${e.message}`, error: true });
@@ -518,6 +539,7 @@ async function processBasicInstantItem(item, prof, tplRow, loopEpoch) {
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, '', previewHtml, 'sending');
+  updateState(item.id, 'sending');
   const sendResult = await sendEmail({
     ...item,
     professor_id: prof.id,
@@ -541,7 +563,7 @@ async function processBasicInstantItem(item, prof, tplRow, loopEpoch) {
   publishStep('sent', item, { subject, messageId: sendResult.id });
   publishCompose(item, prof, subject, '', previewHtml, 'sent');
   eventBus.publish({ type: 'sent', professor: prof.email, subject, messageId: sendResult.id, id: item.id, mode: itemMode });
-  lastActivity = Date.now();
+  runtimeState().lastActivity = Date.now();
   ArchiveService.cacheDossier(prof.email, storedDossier || { last_name: lastName }, { mode: itemMode, queue_id: item.id });
   tryAutoAdvanceNext(itemMode, item.id);
   console.log(`[Worker:Basic] Sent to ${prof.email} — ${subject}`);
@@ -629,6 +651,7 @@ async function draftFromRosterKeywords(item, prof, tplRow, loopEpoch, storedDoss
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sending');
+  updateState(item.id, 'sending');
   const sendResult = await sendEmail({
     ...item,
     professor_id: prof.id,
@@ -648,7 +671,7 @@ async function draftFromRosterKeywords(item, prof, tplRow, loopEpoch, storedDoss
   publishStep('sent', item, { subject, messageId: sendResult.id });
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sent');
   eventBus.publish({ type: 'sent', professor: prof.email, subject, messageId: sendResult.id, id: item.id, mode: itemMode });
-  lastActivity = Date.now();
+  runtimeState().lastActivity = Date.now();
   ArchiveService.cacheDossier(prof.email, storedDossier, { mode: itemMode, queue_id: item.id });
   tryAutoAdvanceNext(itemMode, item.id);
   console.log(`[Worker:Roster] Sent to ${prof.email} — ${subject}`);
@@ -667,9 +690,6 @@ async function processRosterSheetItem(item, prof, tplRow, loopEpoch, storedDossi
     return;
   }
 
-  updateState(item.id, 'researching');
-  publishStep('researching', item, { label: `Using uploaded roster for ${prof.email}` });
-
   prof.last_name = lastName;
   db.prepare('UPDATE professors SET last_name=?, name_verified=1 WHERE id=?').run(lastName, prof.id);
 
@@ -678,7 +698,7 @@ async function processRosterSheetItem(item, prof, tplRow, loopEpoch, storedDossi
     full_name: fullName,
     university: storedDossier.university || prof.university || '',
     research_interest: (storedDossier.research_areas || []).join(', '),
-    queue_state: 'researching',
+    queue_state: 'pending',
   });
 
   const subjectMode = itemMode === 'basic_instant'
@@ -714,6 +734,7 @@ async function processRosterSheetItem(item, prof, tplRow, loopEpoch, storedDossi
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, '', previewHtml, 'sending');
+  updateState(item.id, 'sending');
   const sendResult = await sendEmail({
     ...item,
     professor_id: prof.id,
@@ -734,7 +755,7 @@ async function processRosterSheetItem(item, prof, tplRow, loopEpoch, storedDossi
   publishStep('sent', item, { subject, messageId: sendResult.id });
   publishCompose(item, prof, subject, '', previewHtml, 'sent');
   eventBus.publish({ type: 'sent', professor: prof.email, subject, messageId: sendResult.id, id: item.id, mode: itemMode });
-  lastActivity = Date.now();
+  runtimeState().lastActivity = Date.now();
   tryAutoAdvanceNext(itemMode, item.id);
   console.log(`[Worker:Roster] Sent to ${prof.email} — ${subject}`);
 }
@@ -750,6 +771,7 @@ async function processQueueItem(item, loopEpoch) {
       return;
     }
     publishStep('sending', item);
+    updateState(item.id, 'sending');
     try {
       const sendResult = await sendEmail({ ...item, professor_id: prof.id });
       updateState(item.id, 'sent', { sent_at: new Date().toISOString() });
@@ -760,9 +782,10 @@ async function processQueueItem(item, loopEpoch) {
       upsertRosterRow({ email: prof.email, subject_keyword: item.subject?.match(/^\[([^\]]+)\]/)?.[1] || 'custom', interest_line: item.interest_line, queue_state: 'sent' });
       debouncedRosterSync(itemMode);
       publishStep('sent', item, { subject: item.subject, messageId: sendResult.id });
-      eventBus.publish({ type: 'sent', professor: prof.email, subject: item.subject, messageId: sendResult.id, id: item.id });
+      eventBus.publish({ type: 'sent', professor: prof.email, subject: item.subject, messageId: sendResult.id, id: item.id, mode: itemMode });
       console.log(`[Worker] Sent custom-edited email to ${prof.email} — ${item.subject}`);
     } catch (e) {
+      if (isOutboundSendBlockedError(e) || isSendLimitError(e)) throw e;
       console.error(`[Worker] Fast-track custom send failed for ${item.professor_email || item.id}:`, e.message);
       updateState(item.id, 'failed', { error: e.message });
       publishStep('failed', item, { label: `Send failed: ${e.message}`, error: true });
@@ -1044,7 +1067,7 @@ async function processQueueItem(item, loopEpoch) {
   if (!shouldSend) {
     updateState(item.id, 'awaiting_proceed');
     publishStep('awaiting_proceed', item, { label: approvalMode === 'manual' ? 'Awaiting manual approval' : 'Awaiting proceed command' });
-    eventBus.publish({ type: 'awaiting_proceed', professor: item.prof_email, subject, id: item.id, interest_line: interestLine });
+    eventBus.publish({ type: 'awaiting_proceed', professor: item.prof_email, subject, id: item.id, interest_line: interestLine, mode: itemMode });
     return;
   }
 
@@ -1052,6 +1075,7 @@ async function processQueueItem(item, loopEpoch) {
 
   publishStep('sending', item);
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sending');
+  updateState(item.id, 'sending');
   const sendResult = await sendEmail({ ...item, professor_id: prof.id, subject, interest_line: interestLine });
   if (!isSessionEpoch(db, loopEpoch)) return;
 
@@ -1075,16 +1099,17 @@ async function processQueueItem(item, loopEpoch) {
 
   publishStep('sent', item, { subject, messageId: sendResult.id });
   publishCompose(item, prof, subject, interestLine, previewHtml, 'sent');
-  eventBus.publish({ type: 'sent', professor: prof.email, subject, messageId: sendResult.id, id: item.id });
-  lastActivity = Date.now();
+  eventBus.publish({ type: 'sent', professor: prof.email, subject, messageId: sendResult.id, id: item.id, mode: itemMode });
+  runtimeState().lastActivity = Date.now();
   ArchiveService.cacheDossier(prof.email, dossier, { mode: itemMode, queue_id: item.id });
   tryAutoAdvanceNext(itemMode, item.id);
   console.log(`[Worker] Sent to ${prof.email} — ${subject}`);
 }
 
 export function startWorkers() {
-  if (shouldRun) return;
-  shouldRun = true;
+  const state = runtimeState();
+  if (state.shouldRun) return;
+  state.shouldRun = true;
   const n = Math.max(1, Math.min(5, Number(getSettings()?.queue_workers) || 2));
   console.log(`[Worker] Starting ${n} parallel worker(s)`);
   for (let i = 0; i < n; i++) {
@@ -1093,22 +1118,28 @@ export function startWorkers() {
 }
 
 export async function runWorker() {
-  activeWorkers++;
+  const state = runtimeState();
+  state.activeWorkers++;
   console.log('[Worker] Loop started');
 
   const IDLE_DELAY = 3000;
   const ACTIVE_DELAY = 500;
 
-  while (shouldRun) {
+  while (state.shouldRun) {
     try {
       healStuckItems();
+      const sendBlock = getOutboundSendBlock();
+      if (sendBlock?.code === 'SEND_PAUSED') {
+        await delay(5000);
+        continue;
+      }
       const loopEpoch = getSessionEpoch(db);
       const item = getNext();
       if (!item) { await delay(IDLE_DELAY); continue; }
 
       if (!isSessionEpoch(db, loopEpoch)) continue;
 
-      if (!item.duplicate_override && isDupe(item.prof_email)) {
+      if (isDupe(item.prof_email)) {
         const dup = evaluateDuplicate(item.prof_email, getSettings());
         const prior = dup.prior || findPriorOutreach(item.prof_email);
         const itemMode = item.mode || 'instant';
@@ -1130,25 +1161,42 @@ export async function runWorker() {
       } catch (e) {
         const confirmedSent = db.prepare(`
           SELECT message_id, sent_at FROM sent_email_history
-          WHERE queue_id=? AND source='gmail_send'
+          WHERE queue_id=? AND lower(professor_email)=lower(?) AND source='gmail_send'
           ORDER BY id DESC LIMIT 1
-        `).get(item.id);
+        `).get(item.id, item.prof_email);
         const currentState = db.prepare('SELECT state, sent_at FROM queue WHERE id=?').get(item.id);
         if (confirmedSent || currentState?.state === 'sent') {
           updateState(item.id, 'sent', {
             sent_at: confirmedSent?.sent_at || currentState?.sent_at,
+          });
+          eventBus.publish({
+            type: 'sent',
+            id: item.id,
+            professor: item.prof_email,
+            mode: item.mode || 'instant',
             messageId: confirmedSent?.message_id,
             warning: e.message,
           });
           console.error(`[Worker] Post-send processing failed for queue #${item.id}; Gmail send was preserved:`, e.message);
         } else if (isOutboundSendBlockedError(e)) {
           const blocked = getOutboundSendBlock();
-          db.prepare("UPDATE queue SET state='pending', error=?, retry_after=? WHERE id=?")
-            .run(e.message, toSqliteUtc(e.pausedUntil || blocked?.retryAt), item.id);
+          db.prepare("UPDATE queue SET state='pending', error=?, retry_after=?, fast_track=1 WHERE id=?")
+            .run(
+              e.message,
+              e.pausedUntil || blocked?.retryAt ? toSqliteUtc(e.pausedUntil || blocked.retryAt) : null,
+              item.id,
+            );
           eventBus.publish({ type: 'sending_paused', id: item.id, mode: item.mode || 'instant', error: e.message });
         } else if (isSendLimitError(e)) {
-          updateState(item.id, 'failed', { error: e.message });
-          eventBus.publish({ type: 'send_limit_reached', id: item.id, mode: item.mode || 'instant', error: e.message });
+          const blocked = getOutboundSendBlock();
+          if (blocked?.retryAt) {
+            db.prepare("UPDATE queue SET state='pending', error=?, retry_after=?, fast_track=1 WHERE id=?")
+              .run(e.message, toSqliteUtc(blocked.retryAt), item.id);
+            eventBus.publish({ type: 'sending_paused', id: item.id, mode: item.mode || 'instant', error: e.message, retryAt: blocked.retryAt });
+          } else {
+            updateState(item.id, 'failed', { error: e.message });
+            eventBus.publish({ type: 'send_limit_reached', id: item.id, mode: item.mode || 'instant', error: e.message });
+          }
           console.error(`[Worker] Gmail send limit: ${e.message}`);
           await delay(10000);
         } else {
@@ -1170,12 +1218,12 @@ export async function runWorker() {
   }
 
   console.log('[Worker] Loop stopped');
-  activeWorkers--;
+  state.activeWorkers--;
 }
 
-export function stopWorker() { shouldRun = false; }
+export function stopWorker() { runtimeState().shouldRun = false; }
 
 // Legacy single-worker entry — delegates to startWorkers
 export function ensureWorkersRunning() {
-  if (!shouldRun) startWorkers();
+  if (!runtimeState().shouldRun) startWorkers();
 }

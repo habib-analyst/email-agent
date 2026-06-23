@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
   Loader2, Mail, Search, CheckCircle2, Paperclip,
-  Minus, Maximize2, X, Image, Link2, Smile, MoreVertical, Save, ChevronDown, FileText, Activity,
+  Minus, Maximize2, X, Image, Link2, Smile, MoreVertical, Save, ChevronDown, ChevronUp, FileText, Activity,
 } from 'lucide-react';
 import useGmailAuth from '../hooks/useGmailAuth.js';
 
@@ -52,6 +52,7 @@ export default function GmailComposeChrome({
   const [showSent, setShowSent] = useState(false);
   const [showAgentPanel, setShowAgentPanel] = useState(false);
   const [showCc, setShowCc] = useState(false);
+  const [showTemplate, setShowTemplate] = useState(false);
 
   const senderEmail = settings?.sender_name
     ? `${settings.sender_name} <${settings.sender_email || authEmail || 'N/A'}>`
@@ -82,8 +83,29 @@ export default function GmailComposeChrome({
     }
   }, [resetKey, template?.raw_html, basicMode, basicSubjectMode]);
 
+  if (!showTemplate) {
+    return (
+      <button
+        type="button"
+        onClick={() => setShowTemplate(true)}
+        className="flex w-full items-center justify-between gap-3 rounded-xl border border-[rgb(var(--border-subtle))] bg-[rgb(var(--surface-muted))]/45 px-4 py-3 text-left transition-all hover:border-brand-400 hover:bg-brand-500/5"
+      >
+        <span>
+          <span className="block text-xs font-bold text-[rgb(var(--text-primary))]">Email template hidden</span>
+          <span className="mt-0.5 block text-[10px] text-muted">Open the Gmail compose preview and template controls.</span>
+        </span>
+        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-brand-600">Show template <ChevronDown className="h-3.5 w-3.5" /></span>
+      </button>
+    );
+  }
+
   return (
-    <div className="gmail-compose-shell">
+    <div className="gmail-compose-shell space-y-2">
+      <div className="flex justify-end">
+        <button type="button" onClick={() => setShowTemplate(false)} className="inline-flex items-center gap-1 rounded-lg border border-[rgb(var(--border-subtle))] px-3 py-1.5 text-[10px] font-bold text-muted hover:text-[rgb(var(--text-primary))]">
+          Hide template <ChevronUp className="h-3.5 w-3.5" />
+        </button>
+      </div>
       <div key={resetKey} className="gmail-chrome-compose gmail-chrome-compose-float">
         <div className="gmail-chrome-header">
           <span className="gmail-chrome-header-title">New Message</span>

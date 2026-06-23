@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, Send, X, Archive, Loader2, Trash2, Zap } from 'lucide-react';
+import { AlertTriangle, X, Archive, Loader2, Trash2 } from 'lucide-react';
 import { get } from '../api.js';
+import { formatDateTime12 } from '../utils/dateTime.js';
 
 function parseDuplicateError(error) {
   if (!error?.startsWith('duplicate_sent:')) return { sentAt: '', subject: '' };
@@ -8,20 +9,15 @@ function parseDuplicateError(error) {
   return { sentAt: parts[1] || '', subject: parts.slice(2).join(':') || '' };
 }
 
-/** Inline duplicate review — process, send again, skip, or delete. */
+/** Inline permanent duplicate review — skip or delete only. */
 export default function DuplicateReviewPanel({
   items = [],
-  duplicatePolicy,
-  onProcess,
-  onProcessAll,
-  onSendAgain,
   onReject,
   onRejectAll,
   onDelete,
   className = '',
 }) {
   const [archiveHints, setArchiveHints] = useState({});
-  const [processAllConfirm, setProcessAllConfirm] = useState(false);
   const [rejectAllConfirm, setRejectAllConfirm] = useState(false);
   const [bulkWorking, setBulkWorking] = useState(null);
 
@@ -46,29 +42,17 @@ export default function DuplicateReviewPanel({
 
   if (!items.length) return null;
 
-  const policyLabel = {
-    review_always: 'Review duplicates',
-    skip_always: 'Skip all duplicates',
-    skip_within_days: 'Skip if sent recently',
-    allow_after_days: 'Allow after cooldown',
-  }[duplicatePolicy || 'review_always'] || 'Review duplicates';
+  const policyLabel = 'Permanent duplicate block';
 
   const runBulk = async (kind, handler) => {
     if (!handler) return;
-    if (kind === 'process' && !processAllConfirm) {
-      setProcessAllConfirm(true);
-      setRejectAllConfirm(false);
-      return;
-    }
     if (kind === 'reject' && !rejectAllConfirm) {
       setRejectAllConfirm(true);
-      setProcessAllConfirm(false);
       return;
     }
     setBulkWorking(kind);
     try {
       await handler(items.map(i => i.id));
-      setProcessAllConfirm(false);
       setRejectAllConfirm(false);
     } finally {
       setBulkWorking(null);
@@ -94,22 +78,14 @@ export default function DuplicateReviewPanel({
               {rejectAllConfirm ? 'Confirm Reject All' : 'Reject All'}
             </button>
           )}
-          {onProcessAll && (
-            <button type="button" onClick={() => runBulk('process', onProcessAll)} disabled={!!bulkWorking} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500 hover:bg-violet-600 text-white text-[10px] font-semibold disabled:opacity-60">
-              {bulkWorking === 'process' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
-              {processAllConfirm ? 'Confirm Process All' : 'Process All'}
-            </button>
-          )}
         </div>
       </div>
-      {(processAllConfirm || rejectAllConfirm) && (
+      {rejectAllConfirm && (
         <div className="flex items-center justify-between gap-3 p-2.5 rounded-lg bg-white dark:bg-neutral-900 border border-amber-100 dark:border-amber-900/30">
           <p className="text-[10px] text-amber-800 dark:text-amber-200">
-            {processAllConfirm
-              ? `Confirm to process all ${items.length} duplicate email${items.length === 1 ? '' : 's'} through the normal draft flow.`
-              : `Confirm to reject all ${items.length} duplicate email${items.length === 1 ? '' : 's'} without sending.`}
+            {`Confirm to reject all ${items.length} duplicate email${items.length === 1 ? '' : 's'} without sending.`}
           </p>
-          <button type="button" onClick={() => { setProcessAllConfirm(false); setRejectAllConfirm(false); }} disabled={!!bulkWorking} className="text-[10px] text-muted px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-neutral-800">
+          <button type="button" onClick={() => setRejectAllConfirm(false)} disabled={!!bulkWorking} className="text-[10px] text-muted px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-neutral-800">
             Cancel
           </button>
         </div>
@@ -130,9 +106,9 @@ export default function DuplicateReviewPanel({
                 </div>
                 <p className="text-[10px] text-gray-500 truncate mt-0.5">
                   {hint ? (
-                    <>Previously sent: {hint.at ? new Date(hint.at).toLocaleString() : '—'} · {hint.mode}</>
+                    <>Previously sent: {formatDateTime12(hint.at)} · {hint.mode}</>
                   ) : sentAt ? (
-                    <>Previously sent: {new Date(sentAt).toLocaleString()}</>
+                    <>Previously sent: {formatDateTime12(sentAt)}</>
                   ) : (
                     'Matched in contact history'
                   )}
@@ -144,16 +120,6 @@ export default function DuplicateReviewPanel({
                 )}
               </div>
               <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
-                {onProcess && (
-                  <button type="button" onClick={() => onProcess(item.id)} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500 hover:bg-violet-600 text-white text-[10px] font-semibold" title="Queue for normal processing">
-                    <Zap className="w-3 h-3" /> Process
-                  </button>
-                )}
-                {onSendAgain && (
-                  <button type="button" onClick={() => onSendAgain(item.id)} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-[10px] font-semibold" title="Send again immediately">
-                    <Send className="w-3 h-3" /> Send
-                  </button>
-                )}
                 {onReject && (
                   <button type="button" onClick={() => onReject(item.id)} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-neutral-600 text-muted text-[10px] font-medium hover:bg-gray-50 dark:hover:bg-neutral-800">
                     <X className="w-3 h-3" /> Skip
@@ -171,7 +137,7 @@ export default function DuplicateReviewPanel({
       </div>
       <p className="text-[10px] text-muted flex items-center gap-1">
         <Archive className="w-3 h-3 shrink-0" />
-        Process = research &amp; draft like a new professor · Send = resend now · Skip = leave out · Delete = remove from queue
+        Previously sent recipients remain blocked in every send mode. Skip leaves them out; Delete removes the queue row.
       </p>
     </div>
   );

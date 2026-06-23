@@ -1,5 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { get, post, BOOTSTRAP_TIMEOUT } from '../api.js';
+import {
+  get,
+  post,
+  BOOTSTRAP_TIMEOUT,
+  setSessionToken,
+  isSessionVerified,
+  markSessionVerified,
+} from '../api.js';
 import {
   loadCachedAuth, saveCachedAuth, markBackendOk, wasBackendRecentlyOk, clearBackendOk, mergeAuthState,
 } from '../utils/connectionCache.js';
@@ -123,6 +130,22 @@ export function SessionProvider({ children }) {
           await ping();
         }
 
+        if (!isSessionVerified()) {
+          const authStatus = await get('/auth/status', { timeout: 8000 });
+          if (!authStatus?.authenticated) {
+            setSessionToken('');
+            setAuth(authStatus);
+            markBackendOk();
+            setBackendReachable(true);
+            setSessionReady(true);
+            setSessionError(null);
+            setConnectionsSettled(true);
+            initialLoadDoneRef.current = true;
+            return null;
+          }
+          markSessionVerified();
+        }
+
         const data = await get(`/bootstrap?mode=${modeRef.current}`, { timeout: BOOTSTRAP_TIMEOUT });
         const epoch = data?.session?.epoch ?? data?.stats?.sessionEpoch ?? sessionEpochRef.current;
         sessionEpochRef.current = epoch;
@@ -165,6 +188,16 @@ export function SessionProvider({ children }) {
 
         return { epoch, stats: data.stats, queue: data.queue, batches: data.batches, drafts: data.drafts };
       } catch (bootstrapErr) {
+        if (bootstrapErr?.status === 401) {
+          setAuth({ authenticated: false, senderEmail: null, senderName: null, canSend: false, canLoadTemplate: false });
+          markBackendOk();
+          setBackendReachable(true);
+          setSessionReady(true);
+          setSessionError(null);
+          setConnectionsSettled(true);
+          initialLoadDoneRef.current = true;
+          return null;
+        }
         try {
           const m = modeRef.current;
           const short = { timeout: 6000 };
@@ -199,6 +232,7 @@ export function SessionProvider({ children }) {
             markBackendOk();
             setBackendReachable(true);
             setSessionReady(true);
+            setConnectionsSettled(true);
             backendFailStreakRef.current = 0;
             setSessionError('Some data could not be loaded — retrying in the background');
           } else if (backendFailStreakRef.current >= 2 && !wasBackendRecentlyOk()) {
@@ -238,8 +272,6 @@ export function SessionProvider({ children }) {
 
   useEffect(() => {
     loadSession();
-    const i = setInterval(loadSession, 30000);
-    return () => clearInterval(i);
   }, [loadSession, sessionVersion, mode]);
 
   const resetAllSession = useCallback(async () => {

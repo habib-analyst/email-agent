@@ -75,7 +75,7 @@ export default function InstantSendTimePanel({ className = '', embedded = false 
         subtitle="Check professor time zones before you import or send"
         actions={pkBadge}
         collapsible
-        defaultOpen
+        defaultOpen={false}
         bodyClassName="p-4"
       >
         {body}
@@ -91,7 +91,7 @@ export default function InstantSendTimePanel({ className = '', embedded = false 
       subtitle="Check professor time zones before you import or send — green means now is a good time"
       actions={pkBadge}
       collapsible
-      defaultOpen
+      defaultOpen={false}
       bodyClassName="p-4"
     >
       {body}

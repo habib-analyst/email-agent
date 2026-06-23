@@ -1,10 +1,10 @@
-import db from '../db/index.js';
+import db, { currentTenantKey } from '../db/index.js';
 import { eventBus } from '../core/EventBus.js';
 import { scrapeFacultyPage } from '../research/index.js';
 import { enrichProfessorFromScrape } from '../research/profileResearch.js';
 import { generateEmail, resetTokenUsage, getTokenUsage } from '../ai/index.js';
 import { sendEmail, isSendLimitError } from '../gmail/index.js';
-import { getOutboundSendBlock, isOutboundSendBlockedError, toSqliteUtc } from '../gmail/sendControl.js';
+import { getOutboundSendBlock, isOutboundSendBlockedError } from '../gmail/sendControl.js';
 import { formatGreetingLastName, capitalizeWord, lastNameFromEmail, fullNameFromEmail } from '../utils/professor.js';
 import { normalizeInterestLineKeywords } from '../utils/interestLine.js';
 import { getAITargetingHints } from '../learning/index.js';
@@ -18,42 +18,58 @@ import { AuthService } from '../services/AuthService.js';
 import { delay } from './utils.js';
 import { buildBasicOutreachSubject, buildOutreachSubject, getBasicSubjectMode } from '../gmail/basicTemplate.js';
 import { buildDossierFromPastedProfessor, professorsFromRawImportInput } from '../utils/pasteImportParser.js';
+import {
+  recoverOverdueGmailLimitedBatches,
+  rescheduleBatchesAfterGmailReset,
+} from '../services/scheduledGmailRecovery.js';
 
-let schedulerRunning = false;
-let schedulerInterval = null;
-let healInterval = null;
-const processingQueue = [];  // Batch IDs waiting to be processed sequentially
-let currentlyProcessing = null;  // Batch ID currently being processed
-let abortRequested = false;
+const schedulerStates = new Map();
+
+function schedulerState() {
+  const tenant = currentTenantKey() || 'anonymous';
+  if (!schedulerStates.has(tenant)) {
+    schedulerStates.set(tenant, {
+      schedulerInterval: null,
+      healInterval: null,
+      processingQueue: [],
+      currentlyProcessing: null,
+      abortRequested: false,
+    });
+  }
+  return schedulerStates.get(tenant);
+}
 
 /** Stop in-flight scheduled batch work (drafting + sending). Called from agent/stop. */
 export function cancelScheduledWork() {
-  abortRequested = true;
-  processingQueue.length = 0;
-  currentlyProcessing = null;
+  const state = schedulerState();
+  state.abortRequested = true;
+  state.processingQueue.length = 0;
+  state.currentlyProcessing = null;
   db.prepare("UPDATE scheduled_batches SET status='drafted' WHERE status IN ('processing','sending')").run();
 }
 
 export function clearScheduledAbort() {
-  abortRequested = false;
+  schedulerState().abortRequested = false;
 }
 
 function shouldAbort() {
-  return abortRequested;
+  return schedulerState().abortRequested;
 }
 
 export function enqueueBatch(batchId) {
-  if (!processingQueue.includes(batchId) && currentlyProcessing !== batchId) {
-    processingQueue.push(batchId);
-    console.log(`[Scheduler] Batch #${batchId} queued (position ${processingQueue.length})`);
+  const state = schedulerState();
+  if (!state.processingQueue.includes(batchId) && state.currentlyProcessing !== batchId) {
+    state.processingQueue.push(batchId);
+    console.log(`[Scheduler] Batch #${batchId} queued (position ${state.processingQueue.length})`);
   }
-  if (currentlyProcessing === null) processNextInQueue();
+  if (state.currentlyProcessing === null) processNextInQueue();
 }
 
 function processNextInQueue() {
-  if (processingQueue.length === 0) { currentlyProcessing = null; return; }
-  const batchId = processingQueue.shift();
-  currentlyProcessing = batchId;
+  const state = schedulerState();
+  if (state.processingQueue.length === 0) { state.currentlyProcessing = null; return; }
+  const batchId = state.processingQueue.shift();
+  state.currentlyProcessing = batchId;
   db.prepare("UPDATE scheduled_batches SET status='processing' WHERE id=? AND status IN ('pending')").run(batchId);
   eventBus.publish({ type: 'scheduled_batch_processing_started', mode: 'scheduled', batchId });
   console.log(`[Scheduler] Processing batch #${batchId} from queue`);
@@ -61,7 +77,7 @@ function processNextInQueue() {
 }
 
 function advanceQueue() {
-  currentlyProcessing = null;
+  schedulerState().currentlyProcessing = null;
   processNextInQueue();
 }
 
@@ -70,6 +86,7 @@ const HEAL_THRESHOLD_MIN = 30;
 const HEAL_MAX_COUNT = 3;
 
 function healStuckScheduledBatches() {
+  const state = schedulerState();
   const stuck = db.prepare(`
     SELECT id, heal_count FROM scheduled_batches
     WHERE status = 'processing'
@@ -83,42 +100,45 @@ function healStuckScheduledBatches() {
       db.prepare("UPDATE scheduled_batches SET status='failed', heal_count=? WHERE id=?").run(healCount, batch.id);
       eventBus.publish({ type: 'scheduled_batch_error', mode: 'scheduled', batchId: batch.id, error: `Stuck batch failed after ${HEAL_MAX_COUNT} heal attempts` });
       // Remove from queue if present
-      const idx = processingQueue.indexOf(batch.id);
-      if (idx >= 0) processingQueue.splice(idx, 1);
-      if (currentlyProcessing === batch.id) currentlyProcessing = null;
+      const idx = state.processingQueue.indexOf(batch.id);
+      if (idx >= 0) state.processingQueue.splice(idx, 1);
+      if (state.currentlyProcessing === batch.id) state.currentlyProcessing = null;
     } else {
       console.log(`[Scheduler] Healing stuck batch #${batch.id} (heal #${healCount}, stuck >${HEAL_THRESHOLD_MIN}min)`);
       db.prepare("UPDATE scheduled_batches SET status='pending', heal_count=? WHERE id=?").run(healCount, batch.id);
       eventBus.publish({ type: 'scheduled_batch_healed', mode: 'scheduled', batchId: batch.id, healCount });
       // Re-enqueue for processing
-      if (!processingQueue.includes(batch.id)) enqueueBatch(batch.id);
+      if (!state.processingQueue.includes(batch.id)) enqueueBatch(batch.id);
     }
   }
 }
 
 export function startScheduler() {
-  if (schedulerInterval) return;
+  const state = schedulerState();
+  if (state.schedulerInterval) return;
   resetTokenUsage();  // Reset token counters on start — fresh quota each restart
+  recoverOverdueGmailLimitedBatches();
   resumeCrashedBatches();
   // Re-queue any existing pending/processing batches
   const pending = db.prepare("SELECT id FROM scheduled_batches WHERE status IN ('pending','processing') ORDER BY id").all();
   for (const b of pending) {
-    if (!processingQueue.includes(b.id)) processingQueue.push(b.id);
+    if (!state.processingQueue.includes(b.id)) state.processingQueue.push(b.id);
   }
-  if (currentlyProcessing === null) processNextInQueue();
-  schedulerInterval = setInterval(checkScheduledBatches, 5000);
-  healInterval = setInterval(healStuckScheduledBatches, 60000);  // Check every 60s
+  if (state.currentlyProcessing === null) processNextInQueue();
+  state.schedulerInterval = setInterval(checkScheduledBatches, 5000);
+  state.healInterval = setInterval(healStuckScheduledBatches, 60000);  // Check every 60s
   console.log('[Scheduler] Started - sequential processing, 5s send polling, 60s heal check');
 }
 
 export function stopScheduler() {
-  if (schedulerInterval) {
-    clearInterval(schedulerInterval);
-    schedulerInterval = null;
+  const state = schedulerState();
+  if (state.schedulerInterval) {
+    clearInterval(state.schedulerInterval);
+    state.schedulerInterval = null;
   }
-  if (healInterval) {
-    clearInterval(healInterval);
-    healInterval = null;
+  if (state.healInterval) {
+    clearInterval(state.healInterval);
+    state.healInterval = null;
   }
 }
 
@@ -383,23 +403,36 @@ export async function sendScheduledBatch(batchId, preloadedDrafts = null) {
         if (isOutboundSendBlockedError(val)) {
           const blocked = getOutboundSendBlock();
           db.prepare("UPDATE scheduled_drafts SET status='approved', error=? WHERE id=?").run(val.error, val.draft.id);
-          db.prepare(`
-            UPDATE scheduled_batches
-            SET status='scheduled', scheduled_at=?, ready_notice_sent_at=NULL
-            WHERE id=?
-          `).run(toSqliteUtc(blocked?.retryAt || new Date(Date.now() + 60 * 60 * 1000)), batchId);
-          eventBus.publish({ type: 'scheduled_sending_paused', mode: 'scheduled', batchId, error: val.error });
+          const recovery = blocked?.retryAt
+            ? rescheduleBatchesAfterGmailReset(blocked.retryAt, blocked.reason || val.error)
+            : null;
+          if (!recovery?.retryAt) {
+            db.prepare("UPDATE scheduled_batches SET status='drafted', ready_notice_sent_at=NULL WHERE id=?").run(batchId);
+          }
+          eventBus.publish({
+            type: 'scheduled_sending_paused',
+            mode: 'scheduled',
+            batchId,
+            error: val.error,
+            reason: blocked?.reason || val.error,
+            retryAt: recovery?.retryAt || null,
+            gmailResetAt: blocked?.retryAt || null,
+            label: recovery?.retryAt
+              ? `Gmail resets at ${blocked.retryAt}; batch retry is ${recovery.retryAt}`
+              : 'Gmail temporarily paused sending',
+          });
           return { retry: false, paused: true };
         }
         if (isSendLimitError({ message: val.error })) {
           eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', batchId, draftId: val.draft.id, error: val.error });
           const blocked = getOutboundSendBlock();
           db.prepare("UPDATE scheduled_drafts SET status='approved', error=? WHERE id=?").run(val.error, val.draft.id);
-          db.prepare(`
-            UPDATE scheduled_batches
-            SET status='scheduled', scheduled_at=?, ready_notice_sent_at=NULL
-            WHERE id=?
-          `).run(toSqliteUtc(blocked?.retryAt || new Date(Date.now() + 24 * 60 * 60 * 1000)), batchId);
+          const recovery = blocked?.retryAt
+            ? rescheduleBatchesAfterGmailReset(blocked.retryAt, blocked.reason || val.error)
+            : null;
+          if (!recovery?.retryAt) {
+            db.prepare("UPDATE scheduled_batches SET status='drafted', ready_notice_sent_at=NULL WHERE id=?").run(batchId);
+          }
           console.error(`[Scheduler] Send limit reached in batch #${batchId} — batch paused`);
           return { retry: false, limit: true };
         }
@@ -613,9 +646,9 @@ export async function startScheduledBatchProcessing(batchId, { url, emails, max_
 
             // Insert into scheduled_professors (separate table, with batch_id)
             const insertProf = db.prepare(
-              'INSERT OR IGNORE INTO scheduled_professors (email, last_name, source_url, batch_id) VALUES (?,?,?,?)'
+              'INSERT OR IGNORE INTO scheduled_professors (email, last_name, university, source_url, batch_id) VALUES (?,?,?,?,?)'
             );
-            insertProf.run(p.email, p.last_name || '', p.source_url || '', batchId);
+            insertProf.run(p.email, p.last_name || '', p.university || '', p.source_url || '', batchId);
             const prof = db.prepare('SELECT * FROM scheduled_professors WHERE email=? AND batch_id=?').get(p.email, batchId);
             if (!prof) return null;
 

@@ -11,6 +11,7 @@ export default function OnboardingChecklist({
   hasSent = false,
   modeLabel = 'Instant',
   className = '',
+  actions = {},
 }) {
   const { isConnected } = useGmailAuth();
 
@@ -40,9 +41,14 @@ export default function OnboardingChecklist({
             ) : (
               <Circle className="w-4 h-4 text-gray-300 dark:text-neutral-600 shrink-0" />
             )}
-            <span className={s.done ? 'text-muted line-through' : 'text-gray-800 dark:text-neutral-200 font-medium'}>
+            <button
+              type="button"
+              onClick={actions[s.id]}
+              disabled={!actions[s.id]}
+              className={`${s.done ? 'text-muted line-through' : 'text-gray-800 dark:text-neutral-200 font-medium'} text-left disabled:cursor-default ${actions[s.id] ? 'hover:text-brand-600' : ''}`}
+            >
               {s.label}
-            </span>
+            </button>
           </li>
         ))}
       </ol>

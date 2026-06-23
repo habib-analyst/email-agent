@@ -3,7 +3,7 @@ import { Activity } from 'lucide-react';
 import LiveFeed from '../LiveFeed.jsx';
 import SectionShell from './SectionShell.jsx';
 
-export default function LiveActivitySection({ events, connected, className = '' }) {
+export default function LiveActivitySection({ events, connected, className = '', openSignal = 0 }) {
   return (
     <SectionShell
       className={className}
@@ -24,6 +24,7 @@ export default function LiveActivitySection({ events, connected, className = '' 
       noPadding
       collapsible
       defaultOpen
+      openSignal={openSignal}
     >
       <LiveFeed events={events} connected={connected} embedded />
     </SectionShell>

@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import db, { getActiveWorkspace } from '../db/index.js';
 import { detectPlaceholders, getTokenUsage, resetTokenUsage, getTotalQwenTokens, getApiStats, suggestReply } from '../ai/index.js';
-import { sendReplyEmail, sendEmail, isSendLimitError } from '../gmail/index.js';
+import {
+  createReplyDraft,
+  getEmailHtml,
+  getMessageReplyHeaders,
+  sendReplyEmail,
+  sendEmail,
+  isSendLimitError,
+} from '../gmail/index.js';
 import uploadRouter from './upload.js';
 import authRouter from './auth.routes.js';
 import sheetRouter from './sheet.routes.js';
@@ -16,7 +23,7 @@ import { basename, resolve } from 'path';
 import { mkdirSync } from 'fs';
 import { config } from '../config/index.js';
 import { buildRosterRows, rosterToCsv } from '../learning/roster.js';
-import { syncRosterFromDb, readRosterExcelBuffer, readRosterExcel, clearRosterExcel, rosterToXlsxBuffer, upsertRosterRow } from '../learning/rosterExcel.js';
+import { syncRosterFromDb, readRosterExcelBuffer, readRosterExcel, clearRosterExcel, rosterToXlsxBuffer, upsertRosterRow, removeRosterRow } from '../learning/rosterExcel.js';
 import {
   runWebResearchForProfessor,
   getProfileResearchStatus,
@@ -42,10 +49,10 @@ import { saveTemplateForMode, repairBasicInstantTemplate, ensureTemplateForMode,
 import { findPriorOutreach, recordDuplicateBlocked } from '../db/duplicateCheck.js';
 import { evaluateDuplicate } from '../db/duplicatePolicy.js';
 import { autoStartBatchQueue, runBatchForMode, getQueueProgress } from '../services/batchRunner.js';
+import { reconcileInstantQueue } from '../services/startupReconciliation.js';
 import { validateEmailList, validateProfessorEntries } from '../validation/importValidation.js';
 import { parseCampaignPresets, serializeCampaignPresets, DEFAULT_CAMPAIGN_PRESETS } from '../db/campaignPresets.js';
 import { suggestScheduledAt } from '../utils/scheduleSuggest.js';
-import { ArchiveService } from '../services/ArchiveService.js';
 import archiveRouter from './archive.js';
 import adminRouter from './admin.routes.js';
 import attachmentRouter from './attachment.routes.js';
@@ -54,6 +61,8 @@ import { getAgentContext } from '../db/agentContext.js';
 import { isBasicInstant, isBasicMode } from '../config/modes.js';
 import { professorsFromRawImportInput } from '../utils/pasteImportParser.js';
 import { getDeliveryFailureStats, recordDeliveryFailure } from '../db/deliveryFailures.js';
+import { getOutboundSendBlock } from '../gmail/sendControl.js';
+import { getInstantQueueGroupRows, latestInstantQueueGroup, listInstantQueueGroups } from '../services/instantQueueGroups.js';
 
 const router = Router();
 const BLOCKED_TEST_DOMAINS = ['example.com', 'example.edu'];
@@ -393,6 +402,9 @@ router.post('/professors', async (req, res) => {
   if (isSingle) {
     const enriched = await enrichProfessorFromEmailImport({ prof: limitedProfs[0], mode });
     const result = enqueueSingleProfessorForReview(limitedProfs[0], mode, enriched);
+    const autoStart = result.singleQueueId
+      ? await autoStartBatchQueue([result.singleQueueId], 'after_paste_import', mode)
+      : { autoStarted: false, templateLoaded: false };
     return res.json({
       ...result,
       total: 1,
@@ -400,8 +412,9 @@ router.post('/professors', async (req, res) => {
       isSingle: true,
       queuedImmediately: true,
       queueIds: result.singleQueueId ? [result.singleQueueId] : [],
-      autoStarted: false,
-      templateLoaded: false,
+      awaitingProceed: result.awaitingProceed && !autoStart.autoStarted,
+      autoStarted: autoStart.autoStarted,
+      templateLoaded: autoStart.templateLoaded,
     });
   }
 
@@ -578,7 +591,7 @@ router.post('/professors', async (req, res) => {
   syncRosterFromDb(mode);
 
   let autoStart = { autoStarted: false, templateLoaded: false };
-  if (added > 0 && !isSingle) {
+  if (added > 0) {
     autoStart = await autoStartBatchQueue(queueIds, 'after_paste_import', mode);
   }
 
@@ -790,7 +803,7 @@ router.delete('/professors/:id', (req, res) => {
 });
 
 router.put('/professor/:id', (req, res) => {
-  const { full_name, last_name, interest_line, subject_keyword } = req.body;
+  const { full_name, last_name, university, interest_line, subject_keyword } = req.body;
   const mode = req.query.mode || 'instant';
   if (mode === 'scheduled' || mode === 'basic_scheduled') {
     const prof = db.prepare('SELECT id, dossier FROM scheduled_professors WHERE id=?').get(req.params.id);
@@ -799,11 +812,12 @@ router.put('/professor/:id', (req, res) => {
     try { dossier = JSON.parse(prof.dossier || '{}'); } catch { dossier = {}; }
     const normalizedInterest = interest_line !== undefined ? normalizeInterestLineKeywords(interest_line || '') : undefined;
     const resolvedLastName = last_name || (full_name ? full_name.split(/\s+/).pop() : undefined);
-    if (resolvedLastName !== undefined || normalizedInterest !== undefined || subject_keyword !== undefined || full_name !== undefined) {
+    if (resolvedLastName !== undefined || university !== undefined || normalizedInterest !== undefined || subject_keyword !== undefined || full_name !== undefined) {
       dossier = {
         ...dossier,
         ...(full_name !== undefined ? { name: full_name } : {}),
         ...(resolvedLastName !== undefined ? { last_name: resolvedLastName } : {}),
+        ...(university !== undefined ? { university } : {}),
         ...(subject_keyword !== undefined ? { subject_keyword } : {}),
         ...(normalizedInterest !== undefined ? {
           interest_line: normalizedInterest,
@@ -813,13 +827,15 @@ router.put('/professor/:id', (req, res) => {
           ...(dossier.roster || {}),
           ...(full_name !== undefined ? { full_name } : {}),
           ...(resolvedLastName !== undefined ? { last_name: resolvedLastName } : {}),
+          ...(university !== undefined ? { university } : {}),
           ...(subject_keyword !== undefined ? { subject_keyword } : {}),
           ...(normalizedInterest !== undefined ? { research_interest: normalizedInterest } : {}),
         },
       };
     }
-    db.prepare('UPDATE scheduled_professors SET last_name=COALESCE(?, last_name), research_areas=COALESCE(?, research_areas), dossier=? WHERE id=?').run(
+    db.prepare('UPDATE scheduled_professors SET last_name=COALESCE(?, last_name), university=COALESCE(?, university), research_areas=COALESCE(?, research_areas), dossier=? WHERE id=?').run(
       resolvedLastName ?? null,
+      university ?? null,
       normalizedInterest ?? null,
       JSON.stringify(dossier),
       req.params.id,
@@ -855,6 +871,11 @@ router.put('/professor/:id', (req, res) => {
     dossier.last_name = last_name;
     dossier.roster = { ...(dossier.roster || {}), last_name };
   }
+  if (university !== undefined) {
+    db.prepare('UPDATE professors SET university=? WHERE id=?').run(university || '', req.params.id);
+    dossier.university = university || '';
+    dossier.roster = { ...(dossier.roster || {}), university: university || '' };
+  }
   if (interest_line) {
     const normalizedInterest = normalizeInterestLineKeywords(interest_line);
     if (!normalizedInterest) return res.status(400).json({ error: 'Interest line is empty' });
@@ -883,7 +904,7 @@ router.put('/professor/:id', (req, res) => {
 
 router.post('/roster/add', (req, res) => {
   try {
-    const { email, full_name, last_name, subject_keyword, interest_line, mode = 'instant' } = req.body || {};
+    const { email, full_name, last_name, university, subject_keyword, interest_line, mode = 'instant' } = req.body || {};
     const normalizedEmail = String(email || '').toLowerCase().trim();
     if (!normalizedEmail) return res.status(400).json({ error: 'email is required' });
     const normalizedInterest = normalizeInterestLineKeywords(interest_line || '');
@@ -892,6 +913,7 @@ router.post('/roster/add', (req, res) => {
       email: normalizedEmail,
       name: full_name || resolvedLastName,
       last_name: resolvedLastName,
+      university: String(university || '').trim() || universityFromEmail(normalizedEmail),
       subject_keyword: subject_keyword || '',
       interest_line: normalizedInterest,
       research_areas: normalizedInterest ? normalizedInterest.split(/[,;|]/).map(s => s.trim()).filter(Boolean) : [],
@@ -902,14 +924,15 @@ router.post('/roster/add', (req, res) => {
       roster: {
         full_name: full_name || '',
         last_name: resolvedLastName,
+        university: String(university || '').trim(),
         research_interest: normalizedInterest,
       },
     };
     if (mode === 'scheduled' || mode === 'basic_scheduled') {
       const info = db.prepare(`
-        INSERT INTO scheduled_professors (email, last_name, research_areas, dossier, batch_id)
-        VALUES (?,?,?,?,NULL)
-      `).run(normalizedEmail, resolvedLastName, normalizedInterest, JSON.stringify(dossier));
+        INSERT INTO scheduled_professors (email, last_name, university, research_areas, dossier, batch_id)
+        VALUES (?,?,?,?,?,NULL)
+      `).run(normalizedEmail, resolvedLastName, dossier.university, normalizedInterest, JSON.stringify(dossier));
       return res.json({
         ok: true,
         mode,
@@ -920,6 +943,7 @@ router.post('/roster/add', (req, res) => {
           full_name: full_name || '',
           last_name: resolvedLastName,
           email: normalizedEmail,
+          university: dossier.university,
           subject_keyword: subject_keyword || '',
           interest_line: normalizedInterest,
           queue_state: 'pending',
@@ -928,17 +952,19 @@ router.post('/roster/add', (req, res) => {
     }
     let prof = db.prepare('SELECT id FROM professors WHERE email=?').get(normalizedEmail);
     if (prof) {
-      db.prepare('UPDATE professors SET last_name=?, research_areas=?, dossier=?, mode=? WHERE id=?').run(
+      db.prepare('UPDATE professors SET last_name=?, university=?, research_areas=?, dossier=?, mode=? WHERE id=?').run(
         resolvedLastName,
+        dossier.university,
         normalizedInterest,
         JSON.stringify(dossier),
         mode,
         prof.id,
       );
     } else {
-      const info = db.prepare('INSERT INTO professors (email, last_name, research_areas, dossier, mode) VALUES (?,?,?,?,?)').run(
+      const info = db.prepare('INSERT INTO professors (email, last_name, university, research_areas, dossier, mode) VALUES (?,?,?,?,?,?)').run(
         normalizedEmail,
         resolvedLastName,
+        dossier.university,
         normalizedInterest,
         JSON.stringify(dossier),
         mode,
@@ -959,6 +985,7 @@ router.post('/roster/add', (req, res) => {
       email: normalizedEmail,
       full_name: full_name || '',
       last_name: resolvedLastName,
+      university: dossier.university,
       subject_keyword: subject_keyword || '',
       interest_line: normalizedInterest,
       queue_state: 'pending',
@@ -976,15 +1003,36 @@ router.get('/queue', (req, res) => {
   try {
     const mode = req.query.mode || 'instant';
     const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, parseInt(req.query.limit) || 50);
+    const limit = Math.min(500, parseInt(req.query.limit) || 500);
     const offset = (page - 1) * limit;
     res.json(db.prepare(`
-      SELECT q.*, p.email as professor_email, p.last_name, p.university, p.dossier
+      SELECT q.*, p.email as professor_email, p.last_name, p.university, p.dossier,
+        COALESCE(json_extract(p.dossier, '$.roster.last_name'), json_extract(p.dossier, '$.last_name'), p.last_name, '') AS uploaded_last_name,
+        COALESCE(json_extract(p.dossier, '$.subject_keyword'), '') AS uploaded_subject_keyword,
+        COALESCE(json_extract(p.dossier, '$.interest_line'), json_extract(p.dossier, '$.roster.research_interest'), '') AS uploaded_interest_line,
+        (SELECT df.failure_type FROM delivery_failures df
+          WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+          ORDER BY df.received_at DESC, df.id DESC LIMIT 1) AS failure_type,
+        (SELECT df.reason FROM delivery_failures df
+          WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+          ORDER BY df.received_at DESC, df.id DESC LIMIT 1) AS failure_reason,
+        (SELECT df.status FROM delivery_failures df
+          WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+          ORDER BY df.received_at DESC, df.id DESC LIMIT 1) AS failure_status,
+        (SELECT seh.sent_at FROM sent_email_history seh
+          WHERE seh.queue_id=q.id
+          ORDER BY seh.sent_at DESC, seh.id DESC LIMIT 1) AS confirmed_sent_at,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM sent_email_history seh
+          WHERE lower(seh.professor_email)=lower(p.email)
+            AND (seh.queue_id IS NULL OR seh.queue_id!=q.id)
+        ) THEN 1 ELSE 0 END AS previously_contacted
       FROM queue q
       JOIN professors p ON q.professor_id=p.id AND q.mode=p.mode
       WHERE q.mode=?
+        AND q.queue_group_id=(SELECT id FROM instant_queue_groups WHERE mode=? AND closed_at IS NULL ORDER BY queue_number DESC LIMIT 1)
       ORDER BY q.id DESC LIMIT ? OFFSET ?
-    `).all(mode, limit, offset));
+    `).all(mode, mode, limit, offset));
   } catch (e) {
     console.error('[API] /queue:', e.message);
     res.status(500).json({ error: e.message || 'Failed to load queue' });
@@ -993,15 +1041,40 @@ router.get('/queue', (req, res) => {
 
 router.post('/queue/clear-completed', (req, res) => {
   const mode = req.body.mode || req.query.mode || 'instant';
-  const removed = db.prepare("DELETE FROM queue WHERE state IN ('sent','skipped') AND mode=?").run(mode);
-  res.json({ success: true, removed: removed.changes });
-  eventBus.publish({ type: 'queue_cleared', mode, removed: removed.changes });
+  res.json({ success: true, removed: 0, preserved: true });
+  eventBus.publish({ type: 'queue_history_updated', mode, removed: 0 });
+});
+
+router.get('/instant-queues', (req, res) => {
+  try {
+    res.json(listInstantQueueGroups(req.query.mode || 'instant'));
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to load Instant queues' });
+  }
+});
+
+router.get('/instant-queues/:id', (req, res) => {
+  try {
+    const result = getInstantQueueGroupRows(Number(req.params.id), req.query.mode || 'instant');
+    if (!result) return res.status(404).json({ error: 'Instant queue not found' });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to load Instant queue details' });
+  }
 });
 
 router.post('/queue/:id/retry', (req, res) => {
-  const item = db.prepare('SELECT state FROM queue WHERE id=?').get(req.params.id);
+  const item = db.prepare(`
+    SELECT q.state, p.email
+    FROM queue q JOIN professors p ON p.id=q.professor_id
+    WHERE q.id=?
+  `).get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Queue item not found' });
   if (item.state === 'sent') return res.status(400).json({ error: 'Cannot retry a sent item — would cause duplicate send' });
+  if (findPriorOutreach(item.email)) {
+    db.prepare("UPDATE queue SET state='skipped', error='duplicate_skipped', duplicate_override=0 WHERE id=?").run(req.params.id);
+    return res.status(409).json({ error: 'Permanent duplicate protection: this professor was already contacted' });
+  }
   db.prepare("UPDATE queue SET state='pending', error=NULL, retry_count=0 WHERE id=? AND state NOT IN ('sent','sending')").run(req.params.id);
   ensureWorkersRunning();
   res.json({ success: true });
@@ -1036,36 +1109,20 @@ router.post('/queue/:id/reject', (req, res) => {
   res.json({ success: true });
 });
 
-// Process duplicate: queue for normal research/draft (no fast-track send)
+// Duplicate outreach is permanently blocked.
 router.post('/queue/:id/process', (req, res) => {
-  const item = db.prepare('SELECT id, state, professor_id FROM queue WHERE id=?').get(req.params.id);
+  const item = db.prepare('SELECT id FROM queue WHERE id=?').get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Queue item not found' });
-  if (item.state !== 'duplicate_review') {
-    return res.status(400).json({ error: `Cannot process item in '${item.state}' state — only duplicate_review` });
-  }
-  const settings = db.prepare('SELECT approval_mode FROM settings WHERE id=1').get() || {};
-  const nextState = (settings.approval_mode || 'manual') === 'auto' ? 'pending' : 'awaiting_proceed';
-  db.prepare("UPDATE queue SET state=?, error=NULL, fast_track=0, duplicate_override=1, retry_count=0, retry_after=NULL WHERE id=?").run(nextState, req.params.id);
-  eventBus.publish({ type: 'state_change', id: Number(req.params.id), state: nextState });
-  res.json({ success: true, state: nextState });
+  db.prepare("UPDATE queue SET state='skipped', error='duplicate_skipped', duplicate_override=0 WHERE id=?").run(req.params.id);
+  return res.status(409).json({ error: 'Permanent duplicate protection: duplicate emails cannot be processed again' });
 });
 
-// Send Again: move duplicate_review item to pending — user wants to re-send to this professor
+// Delivery-failure resends use their separate one-time confirmed flow.
 router.post('/queue/:id/send-again', (req, res) => {
-  const item = db.prepare('SELECT id, state, professor_id FROM queue WHERE id=?').get(req.params.id);
+  const item = db.prepare('SELECT id FROM queue WHERE id=?').get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Queue item not found' });
-  if (item.state !== 'duplicate_review') return res.status(400).json({ error: `Cannot send-again item in '${item.state}' state — only 'duplicate_review' items` });
-  const prof = db.prepare('SELECT email, last_name FROM professors WHERE id=?').get(item.professor_id);
-  db.prepare("UPDATE queue SET state='pending', error=NULL, fast_track=1, duplicate_override=1, retry_count=0, retry_after=NULL WHERE id=?").run(req.params.id);
-  ArchiveService.recordOutreach({
-    professor_email: prof?.email,
-    last_name: prof?.last_name,
-    status: 'resent',
-    queue_id: item.id,
-    agent_summary: 'User approved re-send to previously contacted professor',
-  });
-  eventBus.publish({ type: 'state_change', id: Number(req.params.id), state: 'pending', fast_track: true });
-  res.json({ success: true });
+  db.prepare("UPDATE queue SET state='skipped', error='duplicate_skipped', duplicate_override=0 WHERE id=?").run(req.params.id);
+  return res.status(409).json({ error: 'Permanent duplicate protection: this professor was already contacted' });
 });
 
 // Edit subject, interest line, professor email, and custom HTML body for a pending/awaiting item
@@ -1154,8 +1211,7 @@ router.get('/roster.xlsx', (req, res) => {
     if (mode === 'instant' && rosterCache.buffer && rosterCache.workspace === workspace && now - rosterCache.timestamp <= 30000) {
       buffer = rosterCache.buffer;
     } else {
-      syncRosterFromDb(mode);
-      const rows = readRosterExcel().length && (mode === 'instant' || mode === 'basic_instant')
+      const rows = (mode === 'instant' || mode === 'basic_instant')
         ? readRosterExcel()
         : buildRosterRows(mode);
       buffer = rosterToXlsxBuffer(rows);
@@ -1177,27 +1233,36 @@ router.get('/roster/sheet', (req, res) => {
   try {
     const mode = req.query.mode || 'instant';
     const sheetRows = readRosterExcel();
-    if (!sheetRows.length) return res.json(buildRosterRows(mode));
+    if (!sheetRows.length) return res.json([]);
     const dbRows = buildRosterRows(mode);
     const byEmail = new Map(dbRows.map(r => [(r.email || '').toLowerCase(), r]));
-    const merged = sheetRows.map(r => {
+    const preserved = sheetRows.map(r => {
       const dbRow = byEmail.get((r.email || '').toLowerCase());
       if (!dbRow) return r;
       return {
-        ...dbRow,
         ...r,
         id: dbRow.id,
-        full_name: r.full_name || dbRow.full_name,
-        last_name: r.last_name || dbRow.last_name,
-        subject_keyword: r.subject_keyword || dbRow.subject_keyword,
-        interest_line: r.interest_line || dbRow.interest_line || dbRow.research_interest,
-        queue_state: r.queue_state || dbRow.queue_state,
       };
     });
-    res.json(merged);
+    res.json(preserved);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+router.delete('/roster/:id', (req, res) => {
+  const mode = req.query.mode || 'instant';
+  const professor = db.prepare('SELECT id, email FROM professors WHERE id=? AND mode=?').get(req.params.id, mode);
+  if (!professor) return res.status(404).json({ error: 'Roster row not found' });
+  const sent = db.prepare("SELECT COUNT(*) AS c FROM queue WHERE professor_id=? AND mode=? AND state='sent'").get(professor.id, mode).c;
+  if (sent) return res.status(400).json({ error: 'Sent history is permanent; this roster row cannot be deleted' });
+  db.transaction(() => {
+    db.prepare('DELETE FROM queue WHERE professor_id=? AND mode=?').run(professor.id, mode);
+    db.prepare('DELETE FROM professors WHERE id=? AND mode=?').run(professor.id, mode);
+  })();
+  removeRosterRow(professor.email);
+  eventBus.publish({ type: 'roster_row_deleted', mode, id: professor.id, email: professor.email });
+  res.json({ success: true });
 });
 
 router.get('/roster', (req, res) => {
@@ -1247,8 +1312,8 @@ router.get('/delivery-failures', (req, res) => {
   try {
     const mode = req.query.mode || null;
     const rows = db.prepare(`
-      SELECT *
-      FROM delivery_failures
+      SELECT df.*
+      FROM delivery_failures df
       WHERE (? IS NULL OR mode=?)
       ORDER BY received_at DESC, id DESC
       LIMIT 200
@@ -1262,9 +1327,15 @@ router.get('/delivery-failures', (req, res) => {
 router.post('/delivery-failures/scan', requireGmail, async (req, res) => {
   try {
     const before = db.prepare('SELECT COUNT(*) as c FROM delivery_failures').get().c;
-    await GmailService.classifyInboxReplies({ maxResults: 250, windowDays: Number(req.body?.windowDays) || 14 });
+    const result = await GmailService.classifyInboxReplies({ maxResults: 500 });
     const after = db.prepare('SELECT COUNT(*) as c FROM delivery_failures').get().c;
-    res.json({ success: true, imported: Math.max(0, after - before), total: after });
+    res.json({
+      success: true,
+      imported: Math.max(0, after - before),
+      scanned: result.scanned || 0,
+      total: after,
+      message: `Scanned ${result.scanned || 0} Gmail messages from the last 72 hours; imported ${Math.max(0, after - before)} new failure(s)`,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Delivery failure scan failed' });
   }
@@ -1272,7 +1343,12 @@ router.post('/delivery-failures/scan', requireGmail, async (req, res) => {
 
 async function sendDeliveryFailure(row) {
   if (!row) throw new Error('Failure not found');
-  if (row.status === 'rejected') throw new Error('Failure is rejected');
+  if (row.status !== 'pending') throw new Error(`Failure is already ${row.status}`);
+  const claimed = db.prepare(
+    "UPDATE delivery_failures SET status='sending' WHERE id=? AND status='pending'"
+  ).run(row.id);
+  if (!claimed.changes) throw new Error('Failure is already being processed');
+  try {
   const linkedDraftId = row.draft_id || db.prepare(`
     SELECT d.id
     FROM scheduled_drafts d
@@ -1301,13 +1377,18 @@ async function sendDeliveryFailure(row) {
     stripInterestLine: draft.batch_mode === 'basic_scheduled',
     scheduledTemplateMode: draft.batch_mode === 'basic_scheduled' ? 'basic_scheduled' : 'scheduled',
     useSubjectKeyword: draft.batch_mode !== 'basic_scheduled',
+    confirmedFailureResend: true,
   });
   db.prepare("UPDATE scheduled_drafts SET status='sent', error=NULL WHERE id=?").run(draft.id);
   db.prepare(`
     INSERT INTO scheduled_sent_log (professor_email, subject, topic, message_id, sent_at, batch_id, draft_id)
     VALUES (?, ?, '', ?, datetime('now'), ?, ?)
   `).run(draft.professor_email, draft.subject, result?.id || null, draft.batch_id, draft.id);
-  db.prepare("UPDATE delivery_failures SET status='resent', reason=COALESCE(reason, '') || ' | resent', received_at=received_at WHERE id=?").run(row.id);
+  db.prepare(`
+    UPDATE delivery_failures
+    SET status='resent', resent_at=datetime('now'), resent_message_id=?
+    WHERE id=? AND status='sending'
+  `).run(result?.id || null, row.id);
   eventBus.publish({
     type: 'scheduled_draft_sent',
     mode: 'scheduled',
@@ -1317,14 +1398,24 @@ async function sendDeliveryFailure(row) {
     subject: draft.subject,
   });
   return { id: row.id, email: draft.professor_email, messageId: result?.id || null };
+  } catch (error) {
+    db.prepare("UPDATE delivery_failures SET status='pending' WHERE id=? AND status='sending'").run(row.id);
+    throw error;
+  }
 }
 
 router.post('/delivery-failures/:id/send', requireGmail, async (req, res) => {
   const row = db.prepare('SELECT * FROM delivery_failures WHERE id=?').get(req.params.id);
   try {
+    if (req.body?.confirm !== true) return res.status(400).json({ error: 'Explicit resend confirmation is required' });
     clearScheduledAbort();
     const result = await sendDeliveryFailure(row);
-    res.json({ success: true, sent: 1, result });
+    res.json({
+      success: true,
+      sent: 1,
+      result,
+      message: 'Email resent once; this failure is now closed',
+    });
   } catch (e) {
     if (isSendLimitError(e)) {
       eventBus.publish({ type: 'scheduled_send_limit_reached', mode: 'scheduled', error: e.message });
@@ -1337,8 +1428,8 @@ router.post('/delivery-failures/send-all', requireGmail, async (req, res) => {
   const failureType = req.body?.failure_type || null;
   const params = failureType ? [failureType] : [];
   const rows = db.prepare(`
-    SELECT * FROM delivery_failures
-    WHERE status='open' ${failureType ? 'AND failure_type=?' : ''}
+    SELECT df.* FROM delivery_failures df
+    WHERE status='pending' ${failureType ? 'AND failure_type=?' : ''}
     ORDER BY received_at ASC, id ASC
   `).all(...params);
   let sent = 0;
@@ -1363,9 +1454,24 @@ router.post('/delivery-failures/send-all', requireGmail, async (req, res) => {
 router.post('/delivery-failures/reject-all', (req, res) => {
   const failureType = req.body?.failure_type || null;
   const result = failureType
-    ? db.prepare("UPDATE delivery_failures SET status='rejected' WHERE status='open' AND failure_type=?").run(failureType)
-    : db.prepare("UPDATE delivery_failures SET status='rejected' WHERE status='open'").run();
+    ? db.prepare("UPDATE delivery_failures SET status='rejected', rejected_at=datetime('now') WHERE status='pending' AND failure_type=?").run(failureType)
+    : db.prepare("UPDATE delivery_failures SET status='rejected', rejected_at=datetime('now') WHERE status='pending'").run();
+  if (result.changes) eventBus.publish({ type: 'delivery_failure_updated', mode: 'scheduled' });
   res.json({ success: true, rejected: result.changes });
+});
+
+router.post('/delivery-failures/:id/reject', (req, res) => {
+  const row = db.prepare('SELECT id, mode, status FROM delivery_failures WHERE id=?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Failure not found' });
+  if (row.status !== 'pending') return res.status(409).json({ error: `Failure is already ${row.status}` });
+  const result = db.prepare(`
+    UPDATE delivery_failures
+    SET status='rejected', rejected_at=datetime('now')
+    WHERE id=? AND status='pending'
+  `).run(row.id);
+  if (!result.changes) return res.status(409).json({ error: 'Failure was already handled' });
+  eventBus.publish({ type: 'delivery_failure_updated', mode: row.mode || 'scheduled', id: row.id, status: 'rejected' });
+  return res.json({ success: true, rejected: 1, message: 'Failure rejected permanently' });
 });
 
 router.put('/delivery-failures/:id/email', (req, res) => {
@@ -1419,6 +1525,7 @@ router.get('/stats', (req, res) => {
   try {
     const mode = req.query.mode || 'instant';
     const scrape = getScrapeStatus();
+    const activeQueueGroupId = latestInstantQueueGroup(mode)?.id || -1;
     const queueStats = db.prepare(`
     SELECT
       COUNT(*) as total,
@@ -1431,8 +1538,8 @@ router.get('/stats', (req, res) => {
       SUM(CASE WHEN state='drafted' THEN 1 ELSE 0 END) as drafted,
       SUM(CASE WHEN state='verified' THEN 1 ELSE 0 END) as verified,
       SUM(CASE WHEN state='skipped' THEN 1 ELSE 0 END) as skipped
-    FROM queue WHERE mode=?
-  `).get(mode);
+    FROM queue WHERE mode=? AND queue_group_id=?
+  `).get(mode, activeQueueGroupId);
     res.json({
       ...queueStats,
       ...getDeliveryFailureStats(mode),
@@ -1445,7 +1552,7 @@ router.get('/stats', (req, res) => {
       totalSent: db.prepare("SELECT COUNT(*) as c FROM sent_email_history").get().c,
       uniqueSentEmails: db.prepare("SELECT COUNT(DISTINCT professor_email) as c FROM sent_email_history").get().c,
       weekSent: db.prepare("SELECT COUNT(*) as c FROM sent_email_history WHERE sent_at >= datetime('now', '-7 days')").get().c,
-      queueSize: db.prepare("SELECT COUNT(*) as c FROM queue WHERE state IN ('pending','awaiting_proceed','duplicate_review','researching','drafted','verified','sending')").get().c,
+      queueSize: db.prepare("SELECT COUNT(*) as c FROM queue WHERE queue_group_id=? AND state IN ('pending','awaiting_proceed','duplicate_review','researching','drafted','verified','sending')").get(activeQueueGroupId).c,
       scheduledBatches: db.prepare("SELECT COUNT(*) as c FROM scheduled_batches WHERE status IN ('pending','processing','drafted','scheduled','sending')").get().c,
       scraping: scrape.running ? 1 : 0,
       scrapePhase: scrape.phase || null,
@@ -1460,6 +1567,11 @@ router.get('/stats', (req, res) => {
 // API usage monitoring endpoint
 router.get('/api-usage', (req, res) => {
   try {
+    const requestedMode = String(req.query.mode || 'instant');
+    const mode = ['instant', 'basic_instant', 'scheduled', 'basic_scheduled'].includes(requestedMode)
+      ? requestedMode
+      : 'instant';
+    const scheduledMode = mode === 'scheduled' || mode === 'basic_scheduled';
     const tokenUsage = getTokenUsage();
     const apiStats = getApiStats();
     const totalTokens = getTotalQwenTokens();
@@ -1477,6 +1589,43 @@ router.get('/api-usage', (req, res) => {
       ...config.geminiSources.map(source => source.source),
       ...(config.openaiApiKey ? ['openai'] : []),
     ];
+    const sendBlock = getOutboundSendBlock();
+    const activeQueueGroupId = scheduledMode ? -1 : (latestInstantQueueGroup(mode)?.id || -1);
+    const queueCounts = scheduledMode ? null : db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN state IN ('researching','drafted','verified','sending') THEN 1 ELSE 0 END) AS processing,
+        SUM(CASE WHEN state IN ('awaiting_proceed','needs_review') THEN 1 ELSE 0 END) AS review,
+        SUM(CASE WHEN state='duplicate_review' OR error='duplicate_skipped' THEN 1 ELSE 0 END) AS duplicates,
+        SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed
+      FROM queue WHERE mode=? AND queue_group_id=?
+    `).get(mode, activeQueueGroupId);
+    const failureCounts = db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN status='pending' AND failure_type='not_found' THEN 1 ELSE 0 END) AS notFound,
+        SUM(CASE WHEN status='pending' AND failure_type='send_limit' THEN 1 ELSE 0 END) AS sendLimit
+      FROM delivery_failures
+      WHERE mode=?
+    `).get(scheduledMode ? 'scheduled' : mode);
+    const modeReplyCounts = db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN classification='positive' THEN 1 ELSE 0 END) AS positive,
+        SUM(CASE WHEN classification='negative' THEN 1 ELSE 0 END) AS negative,
+        SUM(CASE WHEN classification='auto_reply' THEN 1 ELSE 0 END) AS autoReply
+      FROM replies WHERE mode=?
+    `).get(scheduledMode ? 'scheduled' : mode);
+    const modeBatchCounts = db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status='scheduled' THEN 1 ELSE 0 END) AS scheduled,
+        SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) AS processing,
+        SUM(CASE WHEN status='drafted' THEN 1 ELSE 0 END) AS review,
+        SUM(CASE WHEN status='sending' THEN 1 ELSE 0 END) AS sending,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
+      FROM scheduled_batches
+      WHERE status!='cancelled' AND COALESCE(batch_mode, 'scheduled')=?
+    `).get(scheduledMode ? mode : 'scheduled');
 
     res.json({
       keyMode: config.aiKeyMode || 'global',
@@ -1493,6 +1642,38 @@ router.get('/api-usage', (req, res) => {
         tokenDifference: 0,
         isBalanced: true,
       },
+      operational: {
+        mode,
+        queue: queueCounts,
+        failures: {
+          total: Number(failureCounts.total) || 0,
+          pending: Number(failureCounts.pending) || 0,
+          notFound: Number(failureCounts.notFound) || 0,
+          sendLimit: Number(failureCounts.sendLimit) || 0,
+        },
+        replies: {
+          total: Number(modeReplyCounts.total) || 0,
+          positive: Number(modeReplyCounts.positive) || 0,
+          negative: Number(modeReplyCounts.negative) || 0,
+          autoReply: Number(modeReplyCounts.autoReply) || 0,
+        },
+        batches: {
+          scheduled: Number(modeBatchCounts.scheduled) || 0,
+          total: Number(modeBatchCounts.total) || 0,
+          processing: Number(modeBatchCounts.processing) || 0,
+          review: Number(modeBatchCounts.review) || 0,
+          sending: Number(modeBatchCounts.sending) || 0,
+          completed: Number(modeBatchCounts.completed) || 0,
+          failed: Number(modeBatchCounts.failed) || 0,
+        },
+        gmail: {
+          available: !sendBlock,
+          code: sendBlock?.code || null,
+          reason: sendBlock?.reason || null,
+          resetAt: sendBlock?.retryAt || null,
+        },
+        updatedAt: new Date().toISOString(),
+      },
     });
   } catch (e) {
     console.error('[API] /api-usage:', e.message);
@@ -1500,16 +1681,142 @@ router.get('/api-usage', (req, res) => {
   }
 });
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function textTemplateToHtml(template) {
+  return String(template || '')
+    .split(/\n{2,}/)
+    .map(block => `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+function resolveReplyLastName(reply) {
+  const stored = db.prepare(`
+    SELECT last_name FROM (
+      SELECT last_name, 1 AS priority FROM sent_email_history
+      WHERE lower(professor_email)=lower(?) AND last_name IS NOT NULL AND last_name!=''
+      UNION ALL
+      SELECT last_name, 2 AS priority FROM professors
+      WHERE lower(email)=lower(?) AND last_name IS NOT NULL AND last_name!=''
+      UNION ALL
+      SELECT last_name, 3 AS priority FROM scheduled_professors
+      WHERE lower(email)=lower(?) AND last_name IS NOT NULL AND last_name!=''
+    ) ORDER BY priority LIMIT 1
+  `).get(reply.professor_email, reply.professor_email, reply.professor_email);
+  return stored?.last_name || lastNameFromEmail(reply.professor_email) || '';
+}
+
+function personalizeScenario(reply, scenario) {
+  const lastName = resolveReplyLastName(reply);
+  const originalSubject = String(reply.original_subject || 'Your Email').replace(/^(?:Re:\s*)+/i, '');
+  const subject = String(scenario.subject_template || 'Re: {{ORIGINAL_SUBJECT}}')
+    .replace(/\{\{ORIGINAL_SUBJECT\}\}/g, originalSubject)
+    .replace(/\[Original Subject\]/gi, originalSubject);
+  const body = String(scenario.body_template || '')
+    .replace(/\[Last Name\]|\{\{LAST_NAME\}\}/gi, lastName);
+  return { subject, html: textTemplateToHtml(body), lastName };
+}
+
+router.get('/reply-scenarios', (req, res) => {
+  res.json(db.prepare(`
+    SELECT rs.*,
+      (SELECT COUNT(*) FROM replies r WHERE r.scenario_id=rs.id) AS reply_count
+    FROM reply_scenarios rs
+    ORDER BY rs.sort_order, rs.id
+  `).all());
+});
+
+router.post('/reply-scenarios', (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const bodyTemplate = String(req.body?.body_template || '').trim();
+  if (!name || !bodyTemplate) return res.status(400).json({ error: 'Scenario name and body template are required' });
+  try {
+    const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS value FROM reply_scenarios').get().value;
+    const info = db.prepare(`
+      INSERT INTO reply_scenarios
+        (name, description, subject_template, body_template, active, built_in, sort_order)
+      VALUES (?, ?, ?, ?, 1, 0, ?)
+    `).run(
+      name,
+      String(req.body?.description || '').trim(),
+      String(req.body?.subject_template || 'Re: {{ORIGINAL_SUBJECT}}').trim(),
+      bodyTemplate,
+      maxOrder + 1,
+    );
+    eventBus.publish({ type: 'reply_scenarios_updated' });
+    res.json({ success: true, scenario: db.prepare('SELECT * FROM reply_scenarios WHERE id=?').get(info.lastInsertRowid) });
+  } catch (e) {
+    res.status(400).json({ error: e.message.includes('UNIQUE') ? 'A scenario with this name already exists' : e.message });
+  }
+});
+
+router.put('/reply-scenarios/:id', (req, res) => {
+  const scenario = db.prepare('SELECT * FROM reply_scenarios WHERE id=?').get(req.params.id);
+  if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+  const name = String(req.body?.name ?? scenario.name).trim();
+  const bodyTemplate = String(req.body?.body_template ?? scenario.body_template).trim();
+  if (!name || !bodyTemplate) return res.status(400).json({ error: 'Scenario name and body template are required' });
+  db.prepare(`
+    UPDATE reply_scenarios
+    SET name=?, description=?, subject_template=?, body_template=?, active=?, updated_at=datetime('now')
+    WHERE id=?
+  `).run(
+    name,
+    String(req.body?.description ?? scenario.description ?? '').trim(),
+    String(req.body?.subject_template ?? scenario.subject_template ?? 'Re: {{ORIGINAL_SUBJECT}}').trim(),
+    bodyTemplate,
+    req.body?.active === undefined ? scenario.active : (req.body.active ? 1 : 0),
+    scenario.id,
+  );
+  eventBus.publish({ type: 'reply_scenarios_updated' });
+  res.json({ success: true, scenario: db.prepare('SELECT * FROM reply_scenarios WHERE id=?').get(scenario.id) });
+});
+
 router.get('/replies', (req, res) => {
   const mode = req.query.mode || 'instant';
-  res.json(db.prepare('SELECT r.*, sl.subject as original_subject, sl.research_duration_ms, sl.draft_duration_ms, sl.total_duration_ms FROM replies r LEFT JOIN sent_log sl ON r.professor_email=sl.professor_email AND r.mode=sl.mode WHERE r.mode=? ORDER BY r.received_at DESC').all(mode));
+  res.json(db.prepare(`
+    WITH recent_replies AS (
+      SELECT *
+      FROM replies
+      WHERE mode=?
+      ORDER BY received_at DESC, id DESC
+      LIMIT 500
+    )
+    SELECT r.*,
+      COALESCE(r.original_subject, (
+        SELECT sl.subject FROM sent_log sl
+        WHERE lower(sl.professor_email)=lower(r.professor_email) AND sl.mode=r.mode
+        ORDER BY sl.sent_at DESC LIMIT 1
+      )) AS original_subject,
+      rs.name AS scenario_name,
+      rs.body_template AS scenario_body_template,
+      rs.subject_template AS scenario_subject_template,
+      COALESCE((
+        SELECT seh.last_name FROM sent_email_history seh
+        WHERE lower(seh.professor_email)=lower(r.professor_email)
+          AND seh.last_name IS NOT NULL AND seh.last_name!=''
+        ORDER BY seh.sent_at DESC LIMIT 1
+      ), (
+        SELECT p.last_name FROM professors p
+        WHERE lower(p.email)=lower(r.professor_email) LIMIT 1
+      ), '') AS professor_last_name
+    FROM recent_replies r
+    LEFT JOIN reply_scenarios rs ON rs.id=r.scenario_id
+    ORDER BY r.received_at DESC, r.id DESC
+  `).all(mode));
 });
 
 router.post('/replies/scan', requireGmail, async (req, res) => {
   try {
     const result = await GmailService.classifyInboxReplies({
       maxResults: Number(req.body?.maxResults) || 250,
-      windowDays: Number(req.body?.windowDays) || 14,
     });
     eventBus.publish({ type: 'reply_scan_complete', ...result });
     res.json({ success: true, ...result });
@@ -1522,20 +1829,32 @@ router.post('/replies/:id/suggest', async (req, res) => {
   try {
     const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
     if (!reply) return res.status(404).json({ error: 'Reply not found' });
+    if (['sending', 'sent', 'rejected'].includes(reply.workflow_status)) {
+      return res.status(400).json({ error: `Cannot draft a ${reply.workflow_status} reply` });
+    }
 
     const sentLog = db.prepare('SELECT subject FROM sent_log WHERE professor_email=? AND mode=? ORDER BY sent_at DESC LIMIT 1').get(reply.professor_email, reply.mode);
     const original_subject = sentLog?.subject || reply.original_subject || '';
 
-    const result = await suggestReply({
-      professor_email: reply.professor_email,
-      original_subject,
-      reply_classification: reply.classification,
-      reply_summary: reply.summary,
-      original_email_html: reply.reply_body,
-    });
+    const scenario = reply.scenario_id
+      ? db.prepare('SELECT * FROM reply_scenarios WHERE id=? AND active=1').get(reply.scenario_id)
+      : null;
+    const result = scenario
+      ? (() => {
+        const draft = personalizeScenario({ ...reply, original_subject }, scenario);
+        return { suggested_reply_html: draft.html, reply_subject: draft.subject };
+      })()
+      : await suggestReply({
+        professor_email: reply.professor_email,
+        original_subject,
+        reply_classification: reply.classification,
+        reply_summary: reply.summary,
+        original_email_html: reply.reply_body,
+      });
 
-    db.prepare('UPDATE replies SET suggested_reply=?, reply_subject=?, original_subject=? WHERE id=?')
+    db.prepare("UPDATE replies SET suggested_reply=?, reply_subject=?, original_subject=?, workflow_status='drafted' WHERE id=?")
       .run(result.suggested_reply_html, result.reply_subject, original_subject, req.params.id);
+    eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
 
     res.json({
       success: true,
@@ -1548,24 +1867,73 @@ router.post('/replies/:id/suggest', async (req, res) => {
   }
 });
 
+router.put('/replies/:id/scenario', (req, res) => {
+  const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
+  if (!reply) return res.status(404).json({ error: 'Reply not found' });
+  const scenario = db.prepare('SELECT * FROM reply_scenarios WHERE id=? AND active=1').get(req.body?.scenario_id);
+  if (!scenario) return res.status(404).json({ error: 'Active scenario not found' });
+  if (['sending', 'sent', 'rejected'].includes(reply.workflow_status)) {
+    db.prepare(`
+      UPDATE replies SET scenario_id=?, scenario_confidence=1 WHERE id=?
+    `).run(scenario.id, reply.id);
+  } else {
+    const draft = personalizeScenario(reply, scenario);
+    db.prepare(`
+      UPDATE replies
+      SET scenario_id=?, scenario_confidence=1, suggested_reply=?, reply_subject=?, workflow_status='drafted'
+      WHERE id=?
+    `).run(scenario.id, draft.html, draft.subject, reply.id);
+  }
+  eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
+  res.json({ success: true, reply: db.prepare('SELECT * FROM replies WHERE id=?').get(reply.id) });
+});
+
 router.post('/replies/:id/send', requireGmail, async (req, res) => {
+  let claimedReplyId = null;
   try {
     const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
     if (!reply) return res.status(404).json({ error: 'Reply not found' });
-    if (reply.reply_sent) return res.status(400).json({ error: 'Already sent' });
+    if (reply.reply_sent || reply.workflow_status === 'sent') return res.status(400).json({ error: 'Already sent' });
+    if (reply.workflow_status === 'rejected') return res.status(400).json({ error: 'Rejected replies cannot be sent' });
 
     const html = req.body.html || reply.suggested_reply;
     if (!html) return res.status(400).json({ error: 'No reply content to send — generate or provide a draft first' });
 
     const subject = req.body.subject || reply.reply_subject || `Re: ${reply.original_subject || 'Your Email'}`;
     const attachmentPath = req.body.attachment || null;
+    const claimed = db.prepare(`
+      UPDATE replies SET workflow_status='sending'
+      WHERE id=? AND workflow_status NOT IN ('sending','sent','rejected') AND reply_sent=0
+    `).run(reply.id);
+    if (!claimed.changes) return res.status(409).json({ error: 'Reply is already being processed' });
+    claimedReplyId = reply.id;
 
-    const result = await sendReplyEmail({ to: reply.professor_email, subject, html, attachmentPath });
+    const result = await sendReplyEmail({
+      to: reply.professor_email,
+      subject,
+      html,
+      attachmentPath,
+      threadId: reply.thread_id,
+      replyHeaders: await getMessageReplyHeaders(reply.gmail_message_id),
+    });
 
-    db.prepare('UPDATE replies SET reply_sent=1 WHERE id=?').run(req.params.id);
+    db.prepare(`
+      UPDATE replies
+      SET reply_sent=1, replied_by_user=1, workflow_status='sent',
+          reply_sent_at=datetime('now'), sent_message_id=?,
+          suggested_reply=?, reply_subject=?
+      WHERE id=?
+    `).run(result.id || null, html, subject, req.params.id);
+    eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
 
     res.json({ success: true, messageId: result.id });
   } catch (e) {
+    if (claimedReplyId) {
+      db.prepare(`
+        UPDATE replies SET workflow_status=CASE WHEN suggested_reply IS NULL THEN 'new' ELSE 'drafted' END
+        WHERE id=? AND workflow_status='sending'
+      `).run(claimedReplyId);
+    }
     res.status(e.status || 500).json({ error: e.message, code: e.code });
   }
 });
@@ -1575,16 +1943,181 @@ router.put('/replies/:id/draft', (req, res) => {
   if (!reply) return res.status(404).json({ error: 'Reply not found' });
 
   const { suggested_reply, reply_subject } = req.body;
-  db.prepare('UPDATE replies SET suggested_reply=COALESCE(?, suggested_reply), reply_subject=COALESCE(?, reply_subject) WHERE id=?')
+  if (['sending', 'sent', 'rejected'].includes(reply.workflow_status)) {
+    return res.status(400).json({ error: `Cannot edit a ${reply.workflow_status} reply` });
+  }
+  db.prepare(`
+    UPDATE replies
+    SET suggested_reply=COALESCE(?, suggested_reply),
+        reply_subject=COALESCE(?, reply_subject),
+        workflow_status='drafted'
+    WHERE id=?
+  `)
     .run(suggested_reply, reply_subject, req.params.id);
 
   const updated = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
+  eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
   res.json({ success: true, reply: updated });
 });
 
-router.delete('/replies/:id', (req, res) => {
-  db.prepare('DELETE FROM replies WHERE id=?').run(req.params.id);
+router.post('/replies/:id/gmail-draft', requireGmail, async (req, res) => {
+  try {
+    const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
+    if (!reply) return res.status(404).json({ error: 'Reply not found' });
+    if (['sending', 'sent', 'rejected'].includes(reply.workflow_status)) {
+      return res.status(400).json({ error: `Cannot draft a ${reply.workflow_status} reply` });
+    }
+    const html = req.body?.html || reply.suggested_reply;
+    const subject = req.body?.subject || reply.reply_subject || `Re: ${reply.original_subject || 'Your Email'}`;
+    if (!html) return res.status(400).json({ error: 'No reply content to save' });
+    const draft = await createReplyDraft({
+      to: reply.professor_email,
+      subject,
+      html,
+      threadId: reply.thread_id,
+      replyHeaders: await getMessageReplyHeaders(reply.gmail_message_id),
+    });
+    db.prepare(`
+      UPDATE replies
+      SET gmail_draft_id=?, suggested_reply=?, reply_subject=?, workflow_status='drafted'
+      WHERE id=?
+    `).run(draft.id || null, html, subject, reply.id);
+    eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
+    res.json({ success: true, draftId: draft.id });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+router.post('/replies/:id/resend-original', requireGmail, async (req, res) => {
+  let claimedReplyId = null;
+  try {
+    if (req.body?.confirm !== true) return res.status(400).json({ error: 'Explicit resend confirmation is required' });
+    const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
+    if (!reply) return res.status(404).json({ error: 'Reply not found' });
+    if (reply.original_resent_at) return res.status(400).json({ error: 'Original outreach was already resent for this reply' });
+    if (reply.workflow_status === 'rejected') return res.status(400).json({ error: 'Rejected replies cannot be resent' });
+    const claimed = db.prepare(`
+      UPDATE replies SET original_resent_at=datetime('now')
+      WHERE id=? AND original_resent_at IS NULL AND workflow_status!='rejected'
+    `).run(reply.id);
+    if (!claimed.changes) return res.status(409).json({ error: 'Original outreach resend is already being processed' });
+    claimedReplyId = reply.id;
+    const original = db.prepare(`
+      SELECT subject, message_id, sent_at FROM (
+        SELECT subject, message_id, sent_at FROM sent_email_history
+        WHERE lower(professor_email)=lower(?)
+        UNION ALL
+        SELECT subject, message_id, sent_at FROM sent_log
+        WHERE lower(professor_email)=lower(?)
+      )
+      WHERE message_id IS NOT NULL AND message_id!=''
+      ORDER BY sent_at DESC LIMIT 1
+    `).get(reply.professor_email, reply.professor_email);
+    if (!original) return res.status(400).json({ error: 'Original sent email could not be found' });
+    const html = await getEmailHtml(original.message_id);
+    if (!html) return res.status(400).json({ error: 'Original email body could not be loaded from Gmail' });
+    const result = await sendReplyEmail({
+      to: reply.professor_email,
+      subject: original.subject || 'MS/PhD Position Inquiry',
+      html,
+    });
+    db.prepare('UPDATE replies SET original_resent_message_id=? WHERE id=?')
+      .run(result.id || null, reply.id);
+    eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
+    res.json({ success: true, messageId: result.id });
+  } catch (e) {
+    if (claimedReplyId) {
+      db.prepare(`
+        UPDATE replies SET original_resent_at=NULL
+        WHERE id=? AND original_resent_message_id IS NULL
+      `).run(claimedReplyId);
+    }
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+router.post('/replies/:id/reject', (req, res) => {
+  const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
+  if (!reply) return res.status(404).json({ error: 'Reply not found' });
+  if (['sending', 'sent'].includes(reply.workflow_status)) return res.status(400).json({ error: 'Sending or sent replies cannot be rejected' });
+  db.prepare(`
+    UPDATE replies SET workflow_status='rejected', rejected_at=datetime('now') WHERE id=?
+  `).run(reply.id);
+  eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
   res.json({ success: true });
+});
+
+router.delete('/replies/:id', (req, res) => {
+  const reply = db.prepare('SELECT * FROM replies WHERE id=?').get(req.params.id);
+  if (!reply) return res.status(404).json({ error: 'Reply not found' });
+  if (['sending', 'sent'].includes(reply.workflow_status)) return res.status(400).json({ error: 'Sending or sent replies cannot be rejected' });
+  db.prepare("UPDATE replies SET workflow_status='rejected', rejected_at=datetime('now') WHERE id=?").run(reply.id);
+  eventBus.publish({ type: 'reply_updated', id: reply.id, mode: reply.mode });
+  res.json({ success: true, preserved: true });
+});
+
+router.post('/queue/reconcile', (req, res) => {
+  const mode = req.body?.mode || req.query.mode || 'instant';
+  const result = reconcileInstantQueue(mode);
+  eventBus.publish({ type: 'queue_reconciled', mode, ...result });
+  res.json({ success: true, ...result });
+});
+
+router.post('/queue/send-all-safe', async (req, res) => {
+  try {
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({ error: 'Explicit Send All confirmation is required' });
+    }
+    const mode = req.body?.mode || 'instant';
+    const reconciliation = reconcileInstantQueue(mode);
+    const rows = db.prepare(`
+      SELECT q.id
+      FROM queue q
+      JOIN professors p ON p.id=q.professor_id AND p.mode=q.mode
+      WHERE q.mode=?
+        AND q.queue_group_id=(SELECT id FROM instant_queue_groups WHERE mode=? AND closed_at IS NULL ORDER BY queue_number DESC LIMIT 1)
+        AND q.state IN ('pending','failed','sending','needs_review')
+        AND COALESCE(q.error,'')!='rejected_by_user'
+        AND NOT EXISTS (
+          SELECT 1 FROM sent_email_history seh
+          WHERE seh.queue_id=q.id OR lower(seh.professor_email)=lower(p.email)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_failures df
+          WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+            AND df.failure_type IN ('not_found','delivery_failed')
+        )
+      ORDER BY q.id
+    `).all(mode, mode);
+
+    if (!rows.length) {
+      return res.json({
+        success: true,
+        affected: 0,
+        reconciliation,
+        message: 'No safe pending emails are available to send',
+      });
+    }
+
+    const ids = rows.map(row => row.id);
+    const placeholders = ids.map(() => '?').join(',');
+    db.prepare(`
+      UPDATE queue
+      SET state='pending', retry_count=0, research_started_at=NULL,
+          auto_send_requested=1, fast_track=1
+      WHERE id IN (${placeholders})
+    `).run(...ids);
+    const result = await runBatchForMode(mode, {
+      queueIds: ids,
+      source: 'processing_send_all',
+      forceAutoSend: true,
+    });
+    eventBus.publish({ type: 'queue_safe_send_all_started', mode, count: ids.length });
+    return res.json({ success: true, affected: ids.length, reconciliation, ...result });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Safe Send All failed' });
+  }
 });
 
 router.post('/queue/run-batch', async (req, res) => {
@@ -1608,40 +2141,37 @@ router.post('/queue/bulk', async (req, res) => {
   if (!action) return res.status(400).json({ error: 'action required' });
 
   let affected = 0;
+  const activeQueueGroupId = latestInstantQueueGroup(mode)?.id || -1;
   const idFilter = ids?.length ? `AND id IN (${ids.map(() => '?').join(',')})` : '';
-  const params = ids?.length ? [mode, ...ids] : [mode];
+  const params = ids?.length ? [mode, activeQueueGroupId, ...ids] : [mode, activeQueueGroupId];
 
   if (action === 'retry_failed') {
-    affected = db.prepare(`UPDATE queue SET state='pending', retry_count=0, error=NULL, fast_track=1 WHERE mode=? AND state='failed' ${idFilter}`).run(...params).changes;
+    affected = db.prepare(`UPDATE queue SET state='pending', retry_count=0, error=NULL, fast_track=1 WHERE mode=? AND queue_group_id=? AND state='failed' ${idFilter}`).run(...params).changes;
   } else if (action === 'skip_duplicates') {
-    affected = db.prepare(`UPDATE queue SET state='skipped', error='duplicate_skipped' WHERE mode=? AND state='duplicate_review' ${idFilter}`).run(...params).changes;
+    affected = db.prepare(`UPDATE queue SET state='skipped', error='duplicate_skipped' WHERE mode=? AND queue_group_id=? AND state='duplicate_review' ${idFilter}`).run(...params).changes;
   } else if (action === 'process_duplicates') {
-    const settings = db.prepare('SELECT approval_mode FROM settings WHERE id=1').get() || {};
-    const nextState = (settings.approval_mode || 'manual') === 'auto' ? 'pending' : 'awaiting_proceed';
-    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND state='duplicate_review' ${idFilter}`).all(...params);
-    if (!rows.length) return res.json({ success: true, affected: 0 });
-    affected = db.prepare(`UPDATE queue SET state=?, error=NULL, fast_track=0, duplicate_override=1, retry_count=0, retry_after=NULL WHERE mode=? AND state='duplicate_review' ${idFilter}`).run(nextState, ...params).changes;
-    for (const row of rows) {
-      eventBus.publish({ type: 'state_change', id: row.id, state: nextState, mode });
-    }
-    eventBus.publish({ type: 'queue_duplicates_processed', mode, count: affected });
+    affected = db.prepare(`UPDATE queue SET state='skipped', error='duplicate_skipped', duplicate_override=0 WHERE mode=? AND queue_group_id=? AND state='duplicate_review' ${idFilter}`).run(...params).changes;
+    return res.status(409).json({
+      error: 'Permanent duplicate protection: duplicate emails cannot be processed again',
+      affected,
+    });
   } else if (action === 'start_all') {
-    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND state IN ('pending','awaiting_proceed','failed','needs_review') ${idFilter}`).all(...params);
+    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND queue_group_id=? AND state IN ('pending','awaiting_proceed','failed','needs_review') ${idFilter}`).all(...params);
     const result = await runBatchForMode(mode, { queueIds: rows.map(r => r.id) });
     return res.json({ ...result, affected: rows.length });
   } else if (action === 'approve_all') {
-    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).all(...params);
+    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND queue_group_id=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).all(...params);
     if (!rows.length) return res.json({ success: true, affected: 0 });
-    affected = db.prepare(`UPDATE queue SET state='pending', error=NULL, fast_track=1 WHERE mode=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).run(...params).changes;
+    affected = db.prepare(`UPDATE queue SET state='pending', error=NULL, fast_track=1 WHERE mode=? AND queue_group_id=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).run(...params).changes;
     if (rows[0]?.id) prioritizeQueue(rows[0].id);
     for (const row of rows) {
       eventBus.publish({ type: 'state_change', id: row.id, state: 'pending', fast_track: true, mode });
     }
     eventBus.publish({ type: 'queue_bulk_approved', mode, count: affected });
   } else if (action === 'reject_all') {
-    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).all(...params);
+    const rows = db.prepare(`SELECT id FROM queue WHERE mode=? AND queue_group_id=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).all(...params);
     if (!rows.length) return res.json({ success: true, affected: 0 });
-    affected = db.prepare(`UPDATE queue SET state='skipped', error='rejected_by_user', fast_track=0 WHERE mode=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).run(...params).changes;
+    affected = db.prepare(`UPDATE queue SET state='skipped', error='rejected_by_user', fast_track=0 WHERE mode=? AND queue_group_id=? AND state IN ('awaiting_proceed','verified','drafted') ${idFilter}`).run(...params).changes;
     for (const row of rows) {
       eventBus.publish({ type: 'state_change', id: row.id, state: 'skipped', error: 'rejected_by_user', mode });
     }
@@ -1874,7 +2404,7 @@ router.get('/bootstrap', async (req, res) => {
           (SELECT COUNT(*) FROM scheduled_drafts WHERE batch_id=b.id AND status='approved') as approved_count,
           (SELECT COUNT(*) FROM scheduled_drafts WHERE batch_id=b.id AND status='sent') as sent_count,
           (SELECT COUNT(*) FROM scheduled_drafts WHERE batch_id=b.id AND status='failed') as failed_count
-        FROM scheduled_batches b WHERE b.status != 'cancelled' ORDER BY b.created_at DESC LIMIT 50
+        FROM scheduled_batches b WHERE b.status != 'cancelled' ORDER BY b.created_at DESC
       `).all();
 
       const drafts = db.prepare(`
@@ -1923,6 +2453,8 @@ router.get('/bootstrap', async (req, res) => {
       });
     } else {
       const tpl = ensureTemplateForMode(mode);
+      const activeQueueGroup = latestInstantQueueGroup(mode);
+      const activeQueueGroupId = activeQueueGroup?.id || -1;
 
       const queueStats = db.prepare(`
         SELECT
@@ -1936,8 +2468,8 @@ router.get('/bootstrap', async (req, res) => {
           SUM(CASE WHEN state='drafted' THEN 1 ELSE 0 END) as drafted,
           SUM(CASE WHEN state='verified' THEN 1 ELSE 0 END) as verified,
           SUM(CASE WHEN state='skipped' THEN 1 ELSE 0 END) as skipped
-        FROM queue WHERE mode=?
-      `).get(mode);
+        FROM queue WHERE mode=? AND queue_group_id=?
+      `).get(mode, activeQueueGroupId);
 
       res.json({
         ...commonData,
@@ -1952,12 +2484,32 @@ router.get('/bootstrap', async (req, res) => {
           sessionEpoch: getSessionEpoch(db),
         },
         queue: db.prepare(`
-          SELECT q.*, p.email as professor_email, p.last_name, p.university, p.dossier
+          SELECT q.*, p.email as professor_email, p.last_name, p.university, p.dossier,
+            COALESCE(json_extract(p.dossier, '$.roster.last_name'), json_extract(p.dossier, '$.last_name'), p.last_name, '') AS uploaded_last_name,
+            COALESCE(json_extract(p.dossier, '$.subject_keyword'), '') AS uploaded_subject_keyword,
+            COALESCE(json_extract(p.dossier, '$.interest_line'), json_extract(p.dossier, '$.roster.research_interest'), '') AS uploaded_interest_line,
+            (SELECT df.failure_type FROM delivery_failures df
+              WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+              ORDER BY df.received_at DESC, df.id DESC LIMIT 1) AS failure_type,
+            (SELECT df.reason FROM delivery_failures df
+              WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+              ORDER BY df.received_at DESC, df.id DESC LIMIT 1) AS failure_reason,
+            (SELECT df.status FROM delivery_failures df
+              WHERE (df.queue_id=q.id OR (df.queue_id IS NULL AND lower(df.professor_email)=lower(p.email) AND df.mode=q.mode))
+              ORDER BY df.received_at DESC, df.id DESC LIMIT 1) AS failure_status,
+            (SELECT seh.sent_at FROM sent_email_history seh
+              WHERE seh.queue_id=q.id ORDER BY seh.sent_at DESC, seh.id DESC LIMIT 1) AS confirmed_sent_at,
+            CASE WHEN EXISTS (
+              SELECT 1 FROM sent_email_history seh
+              WHERE lower(seh.professor_email)=lower(p.email)
+                AND (seh.queue_id IS NULL OR seh.queue_id!=q.id)
+            ) THEN 1 ELSE 0 END AS previously_contacted
           FROM queue q
           JOIN professors p ON q.professor_id=p.id AND q.mode=p.mode
-          WHERE q.mode=?
-          ORDER BY q.id LIMIT 100
-        `).all(mode),
+          WHERE q.mode=? AND q.queue_group_id=?
+          ORDER BY q.id LIMIT 500
+        `).all(mode, activeQueueGroupId),
+        activeQueue: activeQueueGroup,
         template: tpl?.raw_html ? tpl : null,
         agentContext: getAgentContext(mode),
       });
@@ -1997,7 +2549,7 @@ router.post('/reset', async (req, res) => {
         sessionEpoch: epoch,
         backupPath,
         cleared: ['queue', 'professors', 'template', 'scheduled_batches'],
-        preserved: ['sent_email_history', 'sent_log', 'replies', 'learning_stats', 'scheduled_sent_log', 'archive'],
+          preserved: ['sent_email_history', 'sent_log', 'replies', 'reply_scenarios', 'delivery_failures', 'learning_stats', 'scheduled_sent_log', 'archive'],
       });
     } else {
       const epoch = bumpSessionEpoch(db);
@@ -2010,7 +2562,7 @@ router.post('/reset', async (req, res) => {
         sessionEpoch: epoch,
         backupPath,
         cleared: [mode],
-        preserved: ['sent_email_history', 'sent_log', 'replies', 'learning_stats', 'scheduled_sent_log', 'archive'],
+          preserved: ['sent_email_history', 'sent_log', 'replies', 'reply_scenarios', 'delivery_failures', 'learning_stats', 'scheduled_sent_log', 'archive'],
       });
     }
   } catch (e) {

@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
-import { Clock, AlertTriangle, Activity, Zap, FileText, Globe, Loader2, Trash2, Search, FileSpreadsheet, Edit3, ShieldCheck, Send, CheckCircle2, Calendar, Table2, Mail, Plus, Users, Eye, Save } from 'lucide-react';
+import { Clock, AlertTriangle, Activity, Zap, FileText, Globe, Loader2, Trash2, Search, FileSpreadsheet, Edit3, ShieldCheck, Send, CheckCircle2, Calendar, Table2, Mail, Plus, Users, Eye, Save, ListChecks, X } from 'lucide-react';
 import { get, post, del, put } from '../api.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { useEventStream } from '../core/EventStreamProvider.jsx';
@@ -13,10 +14,7 @@ import GmailComposeChrome from '../components/GmailComposeChrome.jsx';
 import StepCard from '../components/StepCard.jsx';
 import AgentStepToast from '../components/AgentStepToast.jsx';
 import WorkflowPage from '../components/layout/WorkflowPage.jsx';
-import AnalyticsInsightsSection from '../components/layout/AnalyticsInsightsSection.jsx';
-import PipelineCommandCenter from '../components/layout/PipelineCommandCenter.jsx';
-import LiveActivitySection from '../components/layout/LiveActivitySection.jsx';
-import UserActionsPanel from '../components/layout/UserActionsPanel.jsx';
+import { AnalyticsPopupRegistration } from '../context/AnalyticsPopupContext.jsx';
 import ReplyAnalyticsSection from '../components/layout/ReplyAnalyticsSection.jsx';
 import LiveRosterPanel from '../components/LiveRosterPanel.jsx';
 import ScheduledSendTimePanel from '../components/ScheduledSendTimePanel.jsx';
@@ -25,18 +23,23 @@ import OnboardingChecklist from '../components/OnboardingChecklist.jsx';
 import ReadyForNewBanner from '../components/ReadyForNewBanner.jsx';
 import ResetNotice from '../components/ResetNotice.jsx';
 import BasicSubjectOptions, { basicSubjectModeFromSettings } from '../components/BasicSubjectOptions.jsx';
-import ImportWebSearchToggle from '../components/ImportWebSearchToggle.jsx';
 import DesignationSkipFilter from '../components/DesignationSkipFilter.jsx';
-import useAutoClearAfterBatch from '../hooks/useAutoClearAfterBatch.js';
 import { useTimezone } from '../context/TimezoneContext.jsx';
+import { useSettingsModal } from '../context/SettingsModalContext.jsx';
+import useOperationalSummary from '../hooks/useOperationalSummary.js';
 import { rescheduleLocalToUtcIso } from '../utils/scheduleTime.js';
 import { TIMEZONE_COUNTRIES } from '../data/timezones.js';
+import { formatDateTime12, formatTime12, parseServerDate } from '../utils/dateTime.js';
+import WorkflowDeck, { WorkflowSlide } from '../components/layout/WorkflowDeck.jsx';
+import CombinedLiveSection from '../components/layout/CombinedLiveSection.jsx';
+import CommandStrip from '../components/layout/CommandStrip.jsx';
 
 const BATCH_STATUS_STYLE = {
   pending: 'bg-amber-100 text-amber-700',
   processing: 'bg-blue-100 text-blue-700',
   drafted: 'bg-violet-100 text-violet-700',
   scheduled: 'bg-indigo-100 text-indigo-700',
+  rescheduled: 'bg-fuchsia-100 text-fuchsia-700',
   sending: 'bg-cyan-100 text-cyan-700',
   completed: 'bg-emerald-100 text-emerald-700',
   failed: 'bg-red-100 text-red-700',
@@ -46,7 +49,9 @@ const BATCH_STATUS_STYLE = {
 const DRAFT_STATUS_STYLE = {
   draft: 'bg-amber-100 text-amber-700',
   approved: 'bg-emerald-100 text-emerald-700',
+  sending: 'bg-cyan-100 text-cyan-700',
   sent: 'bg-blue-100 text-blue-700',
+  resent: 'bg-indigo-100 text-indigo-700',
   failed: 'bg-red-100 text-red-700',
   cancelled: 'bg-gray-100 text-gray-500',
   needs_web_research: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
@@ -119,7 +124,7 @@ function FilePreview({ data, onConfirm, onCancel, importing, subjectModeLabel })
 // ─── BATCH CARD (enhanced: roster, inline edit, reschedule, progress) ───
 function formatBatchDelta(target) {
   if (!target) return 'No time';
-  const ms = new Date(target).getTime() - Date.now();
+  const ms = parseServerDate(target)?.getTime() - Date.now();
   const abs = Math.abs(ms);
   const minutes = Math.round(abs / 60000);
   if (minutes < 1) return ms >= 0 ? 'due now' : 'overdue';
@@ -133,8 +138,8 @@ function formatBatchDelta(target) {
 
 function ScheduledTimingBoard({ batches, onOpenBatch, onSendOverdueNow }) {
   const active = (batches || []).filter(b => !['completed', 'cancelled', 'failed'].includes(b.status));
-  const next = [...active].filter(b => b.scheduled_at).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))[0];
-  const overdue = active.filter(b => b.scheduled_at && new Date(b.scheduled_at).getTime() <= Date.now() && b.status !== 'sending');
+  const next = [...active].filter(b => b.scheduled_at).sort((a, b) => parseServerDate(a.scheduled_at) - parseServerDate(b.scheduled_at))[0];
+  const overdue = active.filter(b => b.scheduled_at && parseServerDate(b.scheduled_at)?.getTime() <= Date.now() && b.status !== 'sending');
   const manualReady = active.filter(b => b.status === 'drafted' && !b.auto_approve);
   const autoReady = active.filter(b => b.status === 'scheduled' && b.auto_approve);
 
@@ -210,6 +215,7 @@ function SelectedTargetTimePreview({ scheduledAt, selectedCountries }) {
             timeZone: c.tz,
             hour: '2-digit',
             minute: '2-digit',
+            hour12: true,
           });
           const date = scheduledAt.toLocaleDateString('en-US', {
             timeZone: c.tz,
@@ -233,14 +239,21 @@ function SelectedTargetTimePreview({ scheduledAt, selectedCountries }) {
   );
 }
 
-function DeliveryFailureCard({ failures, onRefresh }) {
+function DeliveryFailureCard({ failures, onRefresh, filter = 'all', onClearFilter }) {
   const toast = useToast();
   const [workingId, setWorkingId] = useState(null);
   const [bulkAction, setBulkAction] = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editingEmail, setEditingEmail] = useState('');
-  const failureRows = failures || [];
+  const allFailureRows = failures || [];
+  const failureRows = allFailureRows.filter(failure => (
+    filter === 'all'
+    || (filter === 'pending' && failure.status === 'pending')
+    || (filter === 'not_found' && failure.failure_type === 'not_found')
+    || (filter === 'send_limit' && failure.failure_type === 'send_limit')
+    || (filter === 'failed' && !['not_found', 'send_limit'].includes(failure.failure_type))
+  ));
 
   const run = async (label, fn) => {
     try {
@@ -254,17 +267,20 @@ function DeliveryFailureCard({ failures, onRefresh }) {
 
   const scan = async () => {
     setBulkAction('scan');
-    await run('Scan', () => post('/delivery-failures/scan', { windowDays: 14 }, { timeout: 120000 }));
+    await run('Scan', () => post('/delivery-failures/scan', {}, { timeout: 180000 }));
     setBulkAction('');
   };
 
   const sendOne = async (id) => {
+    const row = failureRows.find(item => item.id === id);
+    if (!window.confirm(`Resend the saved outreach to ${row?.professor_email || 'this recipient'}? This failure can be resent only once.`)) return;
     setWorkingId(id);
-    await run('Send', () => post(`/delivery-failures/${id}/send`, {}, { timeout: 120000 }));
+    await run('Send', () => post(`/delivery-failures/${id}/send`, { confirm: true }, { timeout: 120000 }));
     setWorkingId(null);
   };
 
   const sendAll = async (failureType) => {
+    if (!window.confirm(`Resend every pending ${label(failureType).toLowerCase()} item once?`)) return;
     setBulkAction(failureType);
     await run('Send all', () => post('/delivery-failures/send-all', { failure_type: failureType }, { timeout: 300000 }));
     setBulkAction('');
@@ -285,7 +301,7 @@ function DeliveryFailureCard({ failures, onRefresh }) {
   };
 
   const label = (type) => type === 'send_limit' ? 'Send limit' : type === 'not_found' ? 'Not found' : 'Failed';
-  const openFailures = failureRows.filter(f => f.status !== 'rejected' && f.status !== 'resent');
+  const openFailures = allFailureRows.filter(f => f.status === 'pending');
   const limitCount = openFailures.filter(f => f.failure_type === 'send_limit').length;
   const notFoundCount = openFailures.filter(f => f.failure_type === 'not_found').length;
 
@@ -317,6 +333,12 @@ function DeliveryFailureCard({ failures, onRefresh }) {
           </button>
         </div>
       </div>
+      {filter !== 'all' && (
+        <div className="px-4 py-2 flex items-center justify-between gap-2 bg-amber-50 dark:bg-amber-950/20 border-b border-amber-200 dark:border-amber-900/40">
+          <span className="text-[10px] font-semibold text-amber-800 dark:text-amber-300">Filter: {label(filter)}</span>
+          <button type="button" onClick={onClearFilter} className="text-[10px] font-semibold text-amber-700 hover:underline">Clear filter</button>
+        </div>
+      )}
       <div className="overflow-auto max-h-[320px] bg-[rgb(var(--surface-card))]">
         <table className="w-full text-xs min-w-[760px]">
           <thead className="sticky top-0 bg-[rgb(var(--surface-muted))]">
@@ -345,8 +367,8 @@ function DeliveryFailureCard({ failures, onRefresh }) {
                   </td>
                   <td className="px-3 py-2"><span className="badge text-[9px] bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">{label(f.failure_type)}</span></td>
                   <td className="px-3 py-2 text-muted max-w-[260px] truncate" title={f.reason || ''}>{f.reason || '-'}</td>
-                  <td className="px-3 py-2 text-muted whitespace-nowrap">{f.received_at ? new Date(f.received_at).toLocaleString() : '-'}</td>
-                  <td className="px-3 py-2 text-muted">{f.status || 'open'}</td>
+                  <td className="px-3 py-2 text-muted whitespace-nowrap">{formatDateTime12(f.received_at, '-')}</td>
+                  <td className="px-3 py-2 text-muted">{f.status || 'pending'}</td>
                   <td className="px-3 py-2 text-right">
                     <div className="flex items-center justify-end gap-1.5">
                       {editingId === f.id ? (
@@ -357,11 +379,15 @@ function DeliveryFailureCard({ failures, onRefresh }) {
                       ) : (
                         <>
                           <button type="button" onClick={() => setExpandedId(expandedId === f.id ? null : f.id)} className="px-2 py-1 rounded-lg bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 font-semibold text-[10px]">View</button>
-                          <button type="button" onClick={() => { setEditingId(f.id); setEditingEmail(f.professor_email || ''); }} className="px-2 py-1 rounded-lg bg-blue-500/10 text-blue-700 dark:text-blue-300 font-semibold text-[10px]">Edit email</button>
-                          <button type="button" onClick={() => sendOne(f.id)} disabled={workingId === f.id || f.status === 'rejected'} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold text-[10px] disabled:opacity-60">
-                            {workingId === f.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
-                            Send
-                          </button>
+                          {f.status === 'pending' && (
+                            <>
+                              <button type="button" onClick={() => { setEditingId(f.id); setEditingEmail(f.professor_email || ''); }} className="px-2 py-1 rounded-lg bg-blue-500/10 text-blue-700 dark:text-blue-300 font-semibold text-[10px]">Edit email</button>
+                              <button type="button" onClick={() => sendOne(f.id)} disabled={workingId === f.id} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold text-[10px] disabled:opacity-60">
+                                {workingId === f.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
+                                Send
+                              </button>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
@@ -406,6 +432,8 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
   const [rescheduleDate, setRescheduleDate] = useState('');
   const [rescheduleTime, setRescheduleTime] = useState('09:00');
   const [confirmAction, setConfirmAction] = useState(null); // {type: 'send'|'cancel'|'approve'}
+  const [batchDetails, setBatchDetails] = useState(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
   const [, setClockTick] = useState(0);
 
   // Resend state for completed batches
@@ -449,6 +477,17 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
     get(`/scheduled/batch/${batch.id}/drafts`).then(setDrafts).catch(() => {});
     if (tab === 'roster') get(`/scheduled/batch/${batch.id}/professors`).then(setProfessors).catch(() => {});
     onRefresh?.();
+  };
+
+  const openBatchDetails = async () => {
+    setDetailsLoading(true);
+    try {
+      setBatchDetails(await get(`/scheduled/batch/${batch.id}/details`));
+    } catch (error) {
+      toast.error(error.message || 'Could not load batch details');
+    } finally {
+      setDetailsLoading(false);
+    }
   };
 
   const sendScheduledDraftNow = async (draftId) => {
@@ -555,7 +594,7 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
     if (!scheduled_at) return;
     try {
       const res = await post(`/scheduled/batch/${batch.id}/reschedule-resend`, { scheduled_at });
-      if (res?.batchId) toast?.success?.(`Batch #${res.batchId} created — scheduled for ${new Date(scheduled_at).toLocaleString()}`);
+      if (res?.batchId) toast?.success?.(`Batch #${res.batchId} created — scheduled for ${formatDateTime12(scheduled_at)}`);
       setResendRescheduling(false);
       onRefresh?.();
     } catch (e) {
@@ -637,10 +676,12 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <span className="text-sm font-bold text-gray-900 dark:text-gray-100">#{batch.id}</span>
           <span className={`badge text-[9px] justify-center ${statusBadge}`}>{batch.status}</span>
-          <button onClick={(e) => { e.stopPropagation(); setConfirmAction({ type: ['completed','cancelled'].includes(batch.status) ? 'purge' : 'cancel' }); }}
-            className="p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" title="Delete Batch #{batch.id}">
-            <Trash2 className="w-3.5 h-3.5 text-red-500" />
-          </button>
+          {batch.status !== 'completed' && (
+            <button onClick={(e) => { e.stopPropagation(); setConfirmAction({ type: batch.status === 'cancelled' ? 'purge' : 'cancel' }); }}
+              className="p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" title="Delete Batch #{batch.id}">
+              <Trash2 className="w-3.5 h-3.5 text-red-500" />
+            </button>
+          )}
           {batch.status === 'pending' && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-neutral-800 text-muted font-medium">Queued</span>}
           {batch.auto_approve === 1 && <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-neutral-800 text-emerald-600 dark:text-emerald-400 font-medium">Auto-approve</span>}
           {batch.batch_mode === 'basic_scheduled' && <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-50 dark:bg-neutral-800 text-teal-600 dark:text-teal-400 font-medium">Basic</span>}
@@ -649,7 +690,11 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
         <div className="flex items-center gap-3 shrink-0">
           <span className="text-xs text-muted flex items-center gap-1">
             <Clock className="w-3 h-3" />
-            {batch.scheduled_at ? `${new Date(batch.scheduled_at).toLocaleString()} · ${formatBatchDelta(batch.scheduled_at)}` : '—'}
+            {batch.gmail_retry_at
+              ? `Gmail retry ${formatDateTime12(batch.gmail_retry_at)} · ${formatBatchDelta(batch.gmail_retry_at)}`
+              : batch.scheduled_at
+                ? `${formatDateTime12(batch.scheduled_at)} · ${formatBatchDelta(batch.scheduled_at)}`
+                : '—'}
           </span>
           <span className="text-xs text-gray-600 dark:text-gray-300">
             {batch.draft_count || 0} drafts
@@ -657,6 +702,15 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
             {batch.sent_count > 0 && ` · ${batch.sent_count} sent`}
             {batch.failed_count > 0 && ` · ${batch.failed_count} failed`}
           </span>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); openBatchDetails(); }}
+            disabled={detailsLoading}
+            className="inline-flex items-center gap-1 rounded-lg border border-blue-200 px-2.5 py-1.5 text-[10px] font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-900/50 dark:text-blue-300 dark:hover:bg-blue-950/30"
+          >
+            {detailsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ListChecks className="h-3 w-3" />}
+            Details
+          </button>
           <Search className={`w-3.5 h-3.5 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
         </div>
       </div>
@@ -1020,6 +1074,59 @@ function BatchCard({ batch, expanded, onExpand, onRefresh, onBatchDeleted }) {
           </div>
         </div>
       )}
+      {batchDetails && createPortal(
+        <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/50 p-3 backdrop-blur-sm">
+          <button type="button" className="absolute inset-0" aria-label="Close batch details" onClick={() => setBatchDetails(null)} />
+          <div className="relative flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-neutral-700 dark:bg-neutral-900">
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4 dark:border-neutral-700">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900 dark:text-white">Batch #{batch.id} details</h3>
+                <p className="text-[11px] text-muted">Schedule history, Gmail reset recovery, sends, failures, and replies</p>
+              </div>
+              <button type="button" onClick={() => setBatchDetails(null)} className="rounded-lg p-2 hover:bg-gray-100 dark:hover:bg-neutral-800"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 border-b border-gray-100 p-4 sm:grid-cols-5 dark:border-neutral-800">
+              {[
+                ['Sent', batchDetails.counts.sent, 'text-emerald-600'],
+                ['Remaining', batchDetails.counts.remaining, 'text-blue-600'],
+                ['Failed', batchDetails.counts.failed, 'text-red-600'],
+                ['Replies', batchDetails.counts.replies, 'text-violet-600'],
+                ['Total', batchDetails.counts.total, 'text-gray-900 dark:text-white'],
+              ].map(([label, value, color]) => (
+                <div key={label} className="rounded-xl border border-gray-100 bg-gray-50 p-3 dark:border-neutral-800 dark:bg-neutral-800/60">
+                  <p className="text-[9px] font-semibold uppercase tracking-wider text-muted">{label}</p>
+                  <p className={`mt-1 text-xl font-bold ${color}`}>{value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="grid gap-3 border-b border-gray-100 px-4 py-3 text-xs sm:grid-cols-3 dark:border-neutral-800">
+              <div><p className="text-[9px] uppercase tracking-wider text-muted">Status</p><p className="mt-1 font-semibold">{batchDetails.batch.status}</p></div>
+              <div><p className="text-[9px] uppercase tracking-wider text-muted">Gmail reset</p><p className="mt-1 font-semibold">{batchDetails.batch.gmail_reset_at ? formatDateTime12(batchDetails.batch.gmail_reset_at) : 'Not paused'}</p></div>
+              <div><p className="text-[9px] uppercase tracking-wider text-muted">Reset + 2 minute retry</p><p className="mt-1 font-semibold">{batchDetails.batch.gmail_retry_at ? formatDateTime12(batchDetails.batch.gmail_retry_at) : batchDetails.batch.scheduled_at ? formatDateTime12(batchDetails.batch.scheduled_at) : '—'}</p></div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              <table className="w-full min-w-[720px] text-[11px]">
+                <thead className="sticky top-0 bg-gray-50 text-left text-muted dark:bg-neutral-800">
+                  <tr><th className="px-3 py-2">Timestamp</th><th className="px-3 py-2">Action</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Schedule</th><th className="px-3 py-2">Gmail reset</th><th className="px-3 py-2">Details</th></tr>
+                </thead>
+                <tbody>
+                  {batchDetails.history.map(row => (
+                    <tr key={row.id} className="border-t border-gray-100 dark:border-neutral-800">
+                      <td className="whitespace-nowrap px-3 py-2">{row.created_at ? formatDateTime12(row.created_at) : '—'}</td>
+                      <td className="px-3 py-2 font-semibold">{String(row.action || '').replaceAll('_', ' ')}</td>
+                      <td className="px-3 py-2">{[row.from_status, row.to_status].filter(Boolean).join(' → ') || '—'}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{row.scheduled_at ? formatDateTime12(row.scheduled_at) : '—'}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{row.gmail_reset_at ? formatDateTime12(row.gmail_reset_at) : '—'}</td>
+                      <td className="px-3 py-2 text-muted">{row.detail || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -1036,6 +1143,7 @@ export default function Scheduled() {
     setSettings, setAnalytics, setMode, loadSession, resetSession, applyReset, setAuth,
   } = useSession();
   const { selectedCountries } = useTimezone();
+  const { openSettings, openSentArchive } = useSettingsModal();
 
   useEffect(() => { setMode('scheduled'); }, [setMode]);
   const { isConnected } = useGmailAuth();
@@ -1044,13 +1152,19 @@ export default function Scheduled() {
 
   const [events, setEvents] = useState([]);
   const sessionEpochRef = useRef(0);
-  const autoClearingRef = useRef(false);
   const refreshTimerRef = useRef(null);
+  const rosterRequestRef = useRef(null);
+  const failureRequestRef = useRef(null);
+  const repliesRequestRef = useRef(null);
   const sectionImportRef = useRef(null);
   const sectionBatchRef = useRef(null);
   const sectionTemplateRef = useRef(null);
   const sectionYourBatchesRef = useRef(null);
   const sectionPipelineRef = useRef(null);
+  const sectionActivityRef = useRef(null);
+  const sectionFailuresRef = useRef(null);
+  const sectionRepliesRef = useRef(null);
+  const sectionDuplicatesRef = useRef(null);
 
   // Scheduled roster
   const [rosterRows, setRosterRows] = useState([]);
@@ -1071,7 +1185,6 @@ export default function Scheduled() {
   const scheduleDate = scheduledAt ? `${scheduledAt.getFullYear()}-${String(scheduledAt.getMonth()+1).padStart(2,'0')}-${String(scheduledAt.getDate()).padStart(2,'0')}` : '';
   const scheduleTime = scheduledAt ? `${String(scheduledAt.getHours()).padStart(2,'0')}:${String(scheduledAt.getMinutes()).padStart(2,'0')}` : '09:00';
   const [autoApprove, setAutoApprove] = useState(true);
-  const [skipDuplicates, setSkipDuplicates] = useState(true);
   const [pendingSkippedDuplicates, setPendingSkippedDuplicates] = useState([]);
   const [scheduleSubMode, setScheduleSubMode] = useState(() => {
     try { return localStorage.getItem('email-agent-schedule-submode') || 'scheduled'; } catch { return 'scheduled'; }
@@ -1130,7 +1243,12 @@ export default function Scheduled() {
   const [sentEmails, setSentEmails] = useState([]);
   const [replies, setReplies] = useState([]);
   const [deliveryFailures, setDeliveryFailures] = useState([]);
-  const [apiUsage, setApiUsage] = useState(null);
+  const [batchFilter, setBatchFilter] = useState('all');
+  const [replyFilter, setReplyFilter] = useState('all');
+  const [failureFilter, setFailureFilter] = useState('all');
+  const [openSignals, setOpenSignals] = useState({});
+  const [highlightTarget, setHighlightTarget] = useState('');
+  const { data: apiUsage, refresh: refreshOperational, freshness } = useOperationalSummary(scheduleSubMode);
 
   const setScheduleClockTime = useCallback((value) => {
     const [hourRaw, minuteRaw] = String(value || '').split(':');
@@ -1141,13 +1259,6 @@ export default function Scheduled() {
     base.setHours(hour, minute, 0, 0);
     setScheduledAt(base);
   }, [scheduledAt]);
-
-  useEffect(() => {
-    if (!backendReachable) return undefined;
-    const id = setInterval(() => get('/api-usage').then(setApiUsage).catch(() => {}), 5000);
-    get('/api-usage').then(setApiUsage).catch(() => {});
-    return () => clearInterval(id);
-  }, [backendReachable]);
 
   useEffect(() => {
     try { localStorage.setItem('email-agent-schedule-submode', scheduleSubMode); } catch { /* ignore */ }
@@ -1200,7 +1311,7 @@ export default function Scheduled() {
   const pushActivity = useCallback((entry) => {
     setActivityLog(prev => [{
       id: `${Date.now()}-${entry.stage}`,
-      time: new Date().toLocaleTimeString(),
+      time: formatTime12(new Date()),
       ...entry,
     }, ...prev].slice(0, 20));
   }, []);
@@ -1223,17 +1334,44 @@ export default function Scheduled() {
   }, [pushActivity]);
 
   const fetchRoster = useCallback(async () => {
-    try { const rows = await get('/scheduled/roster'); setRosterRows(rows); } catch {}
-  }, []);
+    if (rosterRequestRef.current) return rosterRequestRef.current;
+    const request = get('/scheduled/roster', { timeout: 20000 })
+      .then(rows => setRosterRows(rows))
+      .catch(error => toast.error(error.message || 'Scheduled roster could not refresh'))
+      .finally(() => { rosterRequestRef.current = null; });
+    rosterRequestRef.current = request;
+    return request;
+  }, [toast]);
 
   const fetchDeliveryFailures = useCallback(async () => {
-    try { const rows = await get('/delivery-failures?mode=scheduled'); setDeliveryFailures(rows); } catch {}
-  }, []);
+    if (failureRequestRef.current) return failureRequestRef.current;
+    const request = get('/delivery-failures?mode=scheduled', { timeout: 20000 })
+      .then(rows => setDeliveryFailures(rows))
+      .catch(error => toast.error(error.message || 'Delivery failures could not refresh'))
+      .finally(() => { failureRequestRef.current = null; });
+    failureRequestRef.current = request;
+    return request;
+  }, [toast]);
+
+  const fetchReplies = useCallback(async () => {
+    if (repliesRequestRef.current) return repliesRequestRef.current;
+    const request = get('/replies?mode=scheduled', { timeout: 20000 })
+      .then(rows => setReplies(rows))
+      .catch(error => toast.error(error.message || 'Replies could not refresh'))
+      .finally(() => { repliesRequestRef.current = null; });
+    repliesRequestRef.current = request;
+    return request;
+  }, [toast]);
 
   const scheduleRefresh = useCallback(() => {
     clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { loadSession(); fetchRoster(); fetchDeliveryFailures(); }, 600);
-  }, [loadSession, fetchRoster, fetchDeliveryFailures]);
+    refreshTimerRef.current = setTimeout(() => {
+      loadSession();
+      fetchRoster();
+      fetchDeliveryFailures();
+      refreshOperational();
+    }, 600);
+  }, [loadSession, fetchRoster, fetchDeliveryFailures, refreshOperational]);
 
   useEffect(() => { fetchRoster(); }, [fetchRoster]);
   useEffect(() => { fetchDeliveryFailures(); }, [fetchDeliveryFailures, sessionVersion]);
@@ -1317,6 +1455,11 @@ export default function Scheduled() {
 
       if (data.sessionEpoch != null && data.sessionEpoch !== sessionEpochRef.current) return;
 
+      if (data.type === 'delivery_failure_updated') {
+        scheduleRefresh();
+        return;
+      }
+
       if (data.type === 'scheduled_batch_processing_started') {
         setScheduledBatches(prev => prev.map(b => b.id === data.batchId ? { ...b, status: 'processing' } : b));
         scheduleRefresh();
@@ -1367,16 +1510,39 @@ export default function Scheduled() {
       }
       if (data.type === 'scheduled_batch_retry_scheduled') {
         toast.info(data.label || `Batch #${data.batchId} will retry in 30 seconds`);
+        setScheduledBatches(prev => prev.map(batch => batch.id === data.batchId ? {
+          ...batch,
+          status: 'scheduled',
+          scheduled_at: data.retryAt || batch.scheduled_at,
+          gmail_retry_at: data.retryAt || batch.gmail_retry_at,
+          gmail_reset_at: data.resetAt || batch.gmail_reset_at,
+        } : batch));
         scheduleRefresh();
       }
       if (data.type === 'scheduled_batch_sending') {
         setScheduledBatches(prev => prev.map(b => b.id === data.batchId ? { ...b, status: 'sending' } : b));
         showAgentStep({ phase: 'sending', label: `Sending batch #${data.batchId}`, batchId: data.batchId });
       }
+      if (data.type === 'scheduled_sending_paused') {
+        const retryAt = data.retryAt ? formatDateTime12(data.retryAt) : null;
+        const message = retryAt
+          ? `Gmail paused sending until ${retryAt}. The batch will resume automatically.`
+          : data.reason || data.error || 'Gmail temporarily paused sending';
+        toast.error(message);
+        setAgentStopped(true);
+        setScheduledBatches(prev => prev.map(batch => batch.id === data.batchId ? {
+          ...batch,
+          status: 'scheduled',
+          scheduled_at: data.retryAt || batch.scheduled_at,
+          gmail_retry_at: data.retryAt || batch.gmail_retry_at,
+          gmail_reset_at: data.gmailResetAt || batch.gmail_reset_at,
+        } : batch));
+        showErrorToast(message);
+        scheduleRefresh();
+      }
       if (data.type === 'scheduled_send_limit_reached') {
         toast.error(data.error || 'Gmail send limit reached — sending stopped');
         setAgentStopped(true);
-        setScheduledBatches(prev => prev.map(b => (b.status === 'sending' || b.status === 'scheduled' || b.status === 'pending') ? { ...b, status: 'drafted' } : b));
         scheduleRefresh();
       }
       if (data.type === 'scheduled_batch_complete') {
@@ -1409,7 +1575,7 @@ export default function Scheduled() {
         setScheduledBatches(prev => prev.map(b => b.id === data.batchId ? { ...b, status: data.status } : b));
       }
 
-      setEvents(prev => [{ ...data, time: new Date().toLocaleTimeString() }, ...prev].slice(0, 50));
+      setEvents(prev => [{ ...data, time: formatTime12(new Date()) }, ...prev].slice(0, 50));
     });
   }, [subscribe, applyReset, loadSession, scheduleRefresh, showAgentStep, showErrorToast, setScheduledBatches, setScheduledDrafts, expandedBatchId, setAuth]);
 
@@ -1419,9 +1585,9 @@ export default function Scheduled() {
   }, [isConnected]);
 
   useEffect(() => {
-    get('/replies?mode=scheduled').then(setReplies).catch(() => {});
+    fetchReplies();
     fetchDeliveryFailures();
-  }, [scheduledStats?.sent, sessionVersion, fetchDeliveryFailures]);
+  }, [scheduledStats?.sent, sessionVersion, fetchDeliveryFailures, fetchReplies]);
 
   // ── Actions ──
 
@@ -1448,14 +1614,14 @@ export default function Scheduled() {
         emails,
         auto_approve: autoApprove ? 1 : 0,
         max_professors: maxProfessors ? parseInt(maxProfessors) : undefined,
-        skip_duplicates: skipDuplicates,
+        skip_duplicates: true,
         batch_mode: scheduleSubMode,
         target_countries: selectedCountries.length ? selectedCountries : undefined,
         ...(skipDesignations.length ? { skip_designations: skipDesignations } : {}),
       });
       setImportMsg(res.skippedDuplicates?.length
         ? `Batch #${res.batchId} scheduled — ${res.skippedDuplicates.length} duplicate(s) skipped (see archive). ${res.processedCount ?? 0} new professor(s) queued.`
-        : `Batch #${res.batchId} (${isBasicSchedule ? 'Basic' : 'Normal'}) scheduled for ${scheduledAt.toLocaleString()} — agent processing started`);
+        : `Batch #${res.batchId} (${isBasicSchedule ? 'Basic' : 'Normal'}) scheduled for ${formatDateTime12(scheduledAt)} — agent processing started`);
       setPendingSkippedDuplicates(res.skippedDuplicates || []);
       setExpandedBatchId(res.batchId);
       clearImportFormForNextBatch();
@@ -1464,31 +1630,6 @@ export default function Scheduled() {
     } catch (e) {
       setImportMsg(e.message || 'Schedule failed');
       showErrorToast(e.message || 'Schedule failed');
-    }
-    setImporting(false);
-    setTimeout(() => setImportMsg(''), 8000);
-  };
-
-  const includeSkippedDuplicates = async () => {
-    if (!pendingSkippedDuplicates.length || !scheduledAt) return;
-    setImporting(true);
-    try {
-      const scheduled_at = scheduledAt.toISOString();
-      const res = await post('/scheduled/batch', {
-        scheduled_at,
-        emails: pendingSkippedDuplicates.map(s => s.email),
-        auto_approve: autoApprove ? 1 : 0,
-        skip_duplicates: false,
-        batch_mode: scheduleSubMode,
-        target_countries: selectedCountries.length ? selectedCountries : undefined,
-      });
-      setImportMsg(`Batch #${res.batchId} includes ${pendingSkippedDuplicates.length} previously contacted professor(s)`);
-      setExpandedBatchId(res.batchId);
-      clearImportFormForNextBatch();
-      loadSession();
-      setTimeout(() => sectionYourBatchesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 150);
-    } catch (e) {
-      showErrorToast(e.message || 'Could not schedule duplicates');
     }
     setImporting(false);
     setTimeout(() => setImportMsg(''), 8000);
@@ -1536,29 +1677,6 @@ export default function Scheduled() {
       await loadSession();
     }
   };
-
-  const autoClearForNewTask = useCallback(async () => {
-    if (autoClearingRef.current || resetting) return;
-    autoClearingRef.current = true;
-    try {
-      clearLocalState();
-      const result = await resetSession(isBasicSchedule ? 'basic_scheduled' : 'scheduled');
-      if (result.success) {
-        sessionEpochRef.current = result.sessionEpoch ?? sessionEpochRef.current;
-        setResetToast(true);
-        setTimeout(() => setResetToast(false), 5000);
-      }
-    } finally {
-      autoClearingRef.current = false;
-    }
-  }, [isBasicSchedule, resetSession, resetting]);
-
-  useAutoClearAfterBatch({
-    batches: scheduledBatches,
-    stats: scheduledStats,
-    onClear: autoClearForNewTask,
-    resetting,
-  });
 
   const saveInstructions = async (instructions, sampleSubject) => {
     setTemplateLoading(true);
@@ -1610,6 +1728,17 @@ export default function Scheduled() {
 
   // ── Stats ──
   const isEmptyWorkspace = !scheduledBatches.length;
+  const completedBatches = scheduledBatches.filter(batch => batch.status === 'completed');
+  const activeBatches = scheduledBatches.filter(batch => batch.status !== 'completed');
+  const matchesBatchFilter = useCallback((batch) => {
+    if (batchFilter === 'all') return true;
+    if (batchFilter === 'scheduled') return ['scheduled', 'rescheduled'].includes(batch.status);
+    if (batchFilter === 'review') return batch.status === 'drafted';
+    if (batchFilter === 'processing') return ['pending', 'processing', 'sending'].includes(batch.status);
+    return batch.status === batchFilter;
+  }, [batchFilter]);
+  const visibleActiveBatches = activeBatches.filter(matchesBatchFilter);
+  const visibleCompletedBatches = completedBatches.filter(matchesBatchFilter);
 
   const replyStats = useMemo(() => {
     if (!replies.length) return null;
@@ -1628,6 +1757,106 @@ export default function Scheduled() {
     sent: scheduledStats?.sent || 0,
     failed: scheduledStats?.failed || 0,
   }), [scheduledStats, scheduledBatches]);
+
+  const statsForCards = useMemo(() => ({
+    ...scheduledStats,
+    deliveryFailed: apiUsage?.operational?.failures?.pending || 0,
+    notFoundFailures: apiUsage?.operational?.failures?.notFound || 0,
+    sendLimitFailures: apiUsage?.operational?.failures?.sendLimit || 0,
+  }), [scheduledStats, apiUsage]);
+
+  const navigateCard = useCallback((target, filter = 'all') => {
+    if (target === 'archive') {
+      openSentArchive();
+      return;
+    }
+    if (target === 'gmail') {
+      openSettings();
+      return;
+    }
+    const refs = {
+      pipeline: sectionPipelineRef,
+      activity: sectionActivityRef,
+      import: sectionImportRef,
+      roster: sectionBatchRef,
+      template: sectionTemplateRef,
+      batches: sectionYourBatchesRef,
+      failures: sectionFailuresRef,
+      replies: sectionRepliesRef,
+      duplicates: sectionDuplicatesRef,
+    };
+    if (target === 'batches') setBatchFilter(filter);
+    if (target === 'failures') setFailureFilter(filter);
+    if (target === 'replies') setReplyFilter(filter);
+    setOpenSignals(current => ({ ...current, [target]: (current[target] || 0) + 1 }));
+    setHighlightTarget(target);
+    setTimeout(() => refs[target]?.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+    setTimeout(() => setHighlightTarget(current => current === target ? '' : current), 2200);
+  }, [openSentArchive, openSettings]);
+
+  const cardActions = useMemo(() => ({
+    pipeline: { label: 'Open pipeline', onClick: () => navigateCard('pipeline') },
+    review: { label: 'Review batches', onClick: () => navigateCard('batches', 'review') },
+    duplicates: { label: 'Review duplicates', onClick: () => navigateCard('duplicates') },
+    failed: { label: 'Show failed batches', onClick: () => navigateCard('batches', 'failed') },
+    notFound: { label: 'Show not found', onClick: () => navigateCard('failures', 'not_found') },
+    sendLimit: { label: 'Show send limits', onClick: () => navigateCard('failures', 'send_limit') },
+    positiveReplies: { label: 'Show positive replies', onClick: () => navigateCard('replies', 'positive') },
+    negativeReplies: { label: 'Show negative replies', onClick: () => navigateCard('replies', 'negative') },
+    scheduledBatches: { label: 'Show scheduled batches', onClick: () => navigateCard('batches', 'scheduled') },
+    totalBatches: { label: 'Show all batches', onClick: () => navigateCard('batches', 'all') },
+    sentHistory: { label: 'Open sent archive', onClick: () => navigateCard('archive') },
+    activity: { label: 'Open live activity', onClick: () => navigateCard('activity') },
+    gmail: { label: 'Open Gmail status', onClick: () => navigateCard('gmail') },
+  }), [navigateCard]);
+  const workflowStages = useMemo(() => {
+    const processingCount = scheduledBatches.filter(batch => ['pending', 'processing'].includes(batch.status)).length;
+    const reviewCount = scheduledBatches.filter(batch => batch.status === 'drafted').length;
+    const scheduledCount = scheduledBatches.filter(batch => ['scheduled', 'rescheduled', 'sending'].includes(batch.status)).length;
+    const failedCount = scheduledBatches.filter(batch => batch.status === 'failed').length;
+    return [
+      {
+        id: 'import',
+        title: 'Import & timing',
+        description: 'You add professors and choose when the scheduled workflow should run.',
+        icon: Calendar,
+        owner: 'user',
+        status: importing ? 'active' : scheduledBatches.length ? 'complete' : 'attention',
+        count: scheduledBatches.length,
+        onClick: () => navigateCard('import'),
+      },
+      {
+        id: 'roster',
+        title: 'Research & roster',
+        description: 'The agent researches professors and builds the live scheduled roster.',
+        icon: Table2,
+        owner: 'agent',
+        status: processingCount ? 'active' : rosterRows.length ? 'ready' : 'idle',
+        count: processingCount || rosterRows.length,
+        onClick: () => navigateCard('roster'),
+      },
+      {
+        id: 'draft',
+        title: 'Draft & approval',
+        description: !autoApprove && reviewCount ? 'Review prepared drafts before the scheduled send.' : 'The agent prepares and verifies every scheduled draft.',
+        icon: Mail,
+        owner: !autoApprove && reviewCount ? 'user' : 'agent',
+        status: !autoApprove && reviewCount ? 'attention' : processingCount ? 'active' : activeScheduledTemplate?.raw_html ? 'ready' : 'idle',
+        count: reviewCount,
+        onClick: () => navigateCard('template'),
+      },
+      {
+        id: 'delivery',
+        title: 'Scheduled delivery',
+        description: 'Track upcoming, rescheduled, sending, completed, and failed batches.',
+        icon: Clock,
+        owner: failedCount ? 'user' : 'agent',
+        status: failedCount ? 'error' : scheduledBatches.some(batch => batch.status === 'sending') ? 'active' : scheduledCount ? 'ready' : completedBatches.length ? 'complete' : 'idle',
+        count: scheduledCount || completedBatches.length,
+        onClick: () => navigateCard('batches', failedCount ? 'failed' : 'all'),
+      },
+    ];
+  }, [scheduledBatches, rosterRows.length, importing, autoApprove, activeScheduledTemplate?.raw_html, completedBatches.length, navigateCard]);
 
   const activeBatch = useMemo(
     () => scheduledBatches.find(b => ['processing', 'sending'].includes(b.status)),
@@ -1697,12 +1926,14 @@ export default function Scheduled() {
         </motion.div>
       )}
 
-      <AnalyticsInsightsSection
-        stats={scheduledStats}
+      <AnalyticsPopupRegistration
+        stats={statsForCards}
         queueStats={liveStats}
         apiUsage={apiUsage}
         health={health}
         replyStats={replyStats}
+        actions={cardActions}
+        freshness={freshness}
       />
 
       <ReadyForNewBanner
@@ -1713,59 +1944,22 @@ export default function Scheduled() {
         label="scheduled batch"
       />
 
-      <div ref={sectionPipelineRef} className="scroll-mt-20">
-        <PipelineCommandCenter
-          mode={isBasicSchedule ? 'basic_scheduled' : 'scheduled'}
-          agentContext={activeAgentContext}
-          currentActivity={currentActivity}
-          activityLog={activityLog}
-          queue={[]}
-          stats={scheduledStats}
-          scrapeProgress={batchProgress}
-          stopped={agentStopped}
-          queueFooter={scheduledBatches.length > 0 ? (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-[rgb(var(--text-secondary))]">Scheduled batches</span>
-                <span className="text-[10px] text-muted">{scheduledBatches.length} total</span>
-              </div>
-              <div className="rounded-xl border border-[rgb(var(--border-subtle))] overflow-hidden">
-                <table className="w-full text-xs">
-                  <thead className="bg-[rgb(var(--surface-muted))]">
-                    <tr>
-                      <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted font-semibold">Batch</th>
-                      <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted font-semibold">Status</th>
-                      <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted font-semibold">Send time</th>
-                      <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-muted font-semibold">Professors</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[rgb(var(--border-subtle))]">
-                    {scheduledBatches.map(b => (
-                      <tr key={b.id} className="hover:bg-[rgb(var(--surface-muted))]/50">
-                        <td className="px-3 py-2 font-medium text-[rgb(var(--text-primary))]">#{b.id}</td>
-                        <td className="px-3 py-2">
-                          <span className={`badge text-[9px] ${BATCH_STATUS_STYLE[b.status] || ''}`}>{b.status}</span>
-                        </td>
-                        <td className="px-3 py-2 text-muted">{b.scheduled_at ? new Date(b.scheduled_at).toLocaleString() : '—'}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted">{b.total || b.professor_count || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : null}
-        />
+      <div ref={sectionPipelineRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${['pipeline', 'activity'].includes(highlightTarget) ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
+        <CombinedLiveSection currentActivity={currentActivity} queue={[]} stats={scheduledStats} scrapeProgress={batchProgress} stopped={agentStopped} events={events} connected={sseConnected} openSignal={Math.max(openSignals.pipeline || 0, openSignals.activity || 0)} />
       </div>
 
-      <LiveActivitySection events={events} connected={sseConnected} />
-
-      <UserActionsPanel title="User actions" subtitle="Onboarding checklist and session reset">
+      <CommandStrip>
         <OnboardingChecklist
           hasQueue={scheduledBatches.length > 0}
           hasTemplate={!!activeScheduledTemplate?.raw_html}
           hasSent={(scheduledStats?.totalSent || 0) > 0}
           modeLabel={isBasicSchedule ? 'Basic Scheduled' : 'Scheduled'}
+          actions={{
+            gmail: () => navigateCard('gmail'),
+            import: () => navigateCard('import'),
+            template: () => navigateCard('template'),
+            send: () => navigateCard('archive'),
+          }}
         />
         <div className="flex items-center justify-between gap-3 pt-2 border-t border-[rgb(var(--border-subtle))]">
           <ResetNotice scope={isBasicSchedule ? 'Basic Scheduled mode' : 'Scheduled mode'} />
@@ -1783,14 +1977,20 @@ export default function Scheduled() {
             </div>
           )}
         </div>
-      </UserActionsPanel>
+      </CommandStrip>
 
       {/* Step 1: Import + Schedule */}
-      <div ref={sectionImportRef} className="scroll-mt-20">
+      <WorkflowDeck activeId={highlightTarget}>
+      <WorkflowSlide id="import" title="Import" icon={Calendar} status={importing ? 'Working' : 'Ready'}>
+      <div ref={sectionImportRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${highlightTarget === 'import' ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
       <StepCard step={1} title="Import & Schedule" subtitle="Add professors and set send time" icon={Calendar}
         active={importing}
         done={scheduledBatches.length > 0}
-        defaultOpen={scheduledBatches.length === 0 || importing}>
+        owner="user"
+        actionRequired={!importing && scheduledBatches.length === 0}
+        statusLabel={importing ? 'Agent preparing batch' : scheduledBatches.length ? 'Batch created' : 'Choose data and time'}
+        defaultOpen={scheduledBatches.length === 0 || importing}
+        openSignal={openSignals.import}>
         <div className="space-y-4">
           <ScheduledSendTimePanel onSuggestTime={(d) => setScheduledAt(d)} embedded />
 
@@ -1824,8 +2024,6 @@ export default function Scheduled() {
               onToggleSearch={toggleSearchSubject}
             />
           )}
-
-          <ImportWebSearchToggle className="mb-3" />
 
           <DesignationSkipFilter value={skipDesignations} onChange={setSkipDesignations} className="mb-3" />
 
@@ -1864,7 +2062,7 @@ export default function Scheduled() {
               <div className="flex items-center gap-2">
                 <Calendar className="w-4 h-4 text-blue-600" />
                 <span className="text-xs font-medium text-blue-700 dark:text-blue-300">
-                  Scheduled for: {scheduledAt.toLocaleString()} (your local time → stored as UTC)
+                  Scheduled for: {formatDateTime12(scheduledAt)} (your local time → stored as UTC)
                 </span>
               </div>
             </div>
@@ -1894,26 +2092,14 @@ export default function Scheduled() {
             </div>
           </div>
 
-          {/* Duplicate guard toggle */}
+          {/* Permanent duplicate guard */}
           <div className="p-3 bg-gray-50 dark:bg-neutral-800/50 rounded-lg border border-gray-200 dark:border-neutral-700">
-            <div className="flex items-center gap-2 mb-2">
-              <ShieldCheck className="w-4 h-4 text-muted" />
-              <span className="text-xs font-semibold text-gray-800 dark:text-gray-200">Duplicate Guard</span>
-            </div>
             <div className="flex items-center gap-2">
-              <div className="flex p-0.5 bg-gray-200 dark:bg-neutral-700 rounded-lg">
-                <button onClick={() => setSkipDuplicates(true)}
-                  className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-medium transition-all ${skipDuplicates ? 'bg-emerald-500 text-white shadow-sm' : 'text-muted hover:text-gray-700 dark:hover:text-gray-300'}`}>
-                  <ShieldCheck className="w-3.5 h-3.5" /> Skip Duplicates
-                </button>
-                <button onClick={() => setSkipDuplicates(false)}
-                  className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-medium transition-all ${!skipDuplicates ? 'bg-amber-500 text-white shadow-sm' : 'text-muted hover:text-gray-700 dark:hover:text-gray-300'}`}>
-                  <Mail className="w-3.5 h-3.5" /> Allow All
-                </button>
+              <ShieldCheck className="w-4 h-4 text-emerald-500" />
+              <div>
+                <p className="text-xs font-semibold text-gray-800 dark:text-gray-200">Permanent duplicate protection</p>
+                <p className="text-[10px] text-muted">Every recipient is checked against sent email history. Previously contacted professors are always skipped.</p>
               </div>
-              <p className="text-[10px] text-muted flex-1">
-                {skipDuplicates ? 'Professors already emailed (any mode) are skipped' : 'All professors processed — may re-email previously contacted professors'}
-              </p>
             </div>
           </div>
 
@@ -1998,9 +2184,7 @@ export default function Scheduled() {
                 ))}
                 {pendingSkippedDuplicates.length > 8 && <li>…and {pendingSkippedDuplicates.length - 8} more</li>}
               </ul>
-              <button type="button" onClick={includeSkippedDuplicates} disabled={importing} className="text-[10px] font-semibold px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-colors">
-                Schedule anyway (re-send to duplicates)
-              </button>
+              <p className="text-[10px] font-semibold text-amber-700 dark:text-amber-300">These recipients were permanently blocked and were not added to the batch.</p>
             </div>
           )}
 
@@ -2010,11 +2194,16 @@ export default function Scheduled() {
       </div>
 
       {/* Step 2: Excel roster + batches */}
-      <div ref={sectionBatchRef} className="scroll-mt-20">
+      </WorkflowSlide>
+      <WorkflowSlide id="roster" title="Excel roster" icon={Table2} badge={rosterRows.length}>
+      <div ref={sectionBatchRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${highlightTarget === 'roster' ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
       <StepCard step={2} title="Excel roster" subtitle="Live roster and scheduled batch progress" icon={Table2}
         active={scheduledBatches.some(b => ['processing', 'sending'].includes(b.status))}
         done={scheduledBatches.some(b => b.status === 'completed')}
-        defaultOpen={scheduledBatches.length > 0}>
+        owner="agent"
+        statusLabel={scheduledBatches.some(b => ['processing', 'sending'].includes(b.status)) ? 'Agent processing' : rosterRows.length ? `${rosterRows.length} professors` : 'Waiting for batch'}
+        defaultOpen={scheduledBatches.length > 0}
+        openSignal={openSignals.roster}>
         <ScheduledTimingBoard
           batches={scheduledBatches}
           onOpenBatch={(id) => {
@@ -2043,11 +2232,17 @@ export default function Scheduled() {
       </div>
 
       {/* Step 3: Email draft */}
-      <div ref={sectionTemplateRef} className="scroll-mt-20">
+      </WorkflowSlide>
+      <WorkflowSlide id="template" title="Email draft" icon={Mail} badge={scheduledBatches.filter(batch => batch.status === 'drafted').length || undefined}>
+      <div ref={sectionTemplateRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${highlightTarget === 'template' ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
       <StepCard step={3} title="Email draft" subtitle={`Review and edit template for ${isBasicSchedule ? 'basic' : 'normal'} scheduled batches`} icon={Mail}
         active={activeScheduledTemplate && !templateSaved}
         done={templateSaved}
-        defaultOpen={!!activeScheduledTemplate?.raw_html}>
+        owner={!autoApprove && scheduledBatches.some(batch => batch.status === 'drafted') ? 'user' : 'agent'}
+        actionRequired={!autoApprove && scheduledBatches.some(batch => batch.status === 'drafted')}
+        statusLabel={!autoApprove && scheduledBatches.some(batch => batch.status === 'drafted') ? 'Review required' : templateSaved ? 'Template saved' : activeScheduledTemplate?.raw_html ? 'Draft ready' : 'Waiting for template'}
+        defaultOpen={!!activeScheduledTemplate?.raw_html}
+        openSignal={openSignals.template}>
         <GmailComposeChrome
           key={`sched-compose-${scheduleSubMode}`}
           template={activeScheduledTemplate}
@@ -2068,11 +2263,17 @@ export default function Scheduled() {
 
 
       {/* Your Batches */}
-      <div ref={sectionYourBatchesRef} className="scroll-mt-20">
+      </WorkflowSlide>
+      <WorkflowSlide id="batches" title="Batches" icon={Clock} badge={scheduledBatches.length || undefined}>
+      <div ref={sectionYourBatchesRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${highlightTarget === 'batches' ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
         <StepCard step={4} title="Your Batches" subtitle="Ready, scheduled, manual, and auto-send batches" icon={Clock}
           active={scheduledBatches.some(b => ['pending', 'processing', 'drafted', 'scheduled', 'sending'].includes(b.status))}
           done={scheduledBatches.some(b => b.status === 'completed')}
-          defaultOpen={scheduledBatches.length > 0}>
+          owner={scheduledBatches.some(batch => batch.status === 'drafted' && !batch.auto_approve) ? 'user' : 'agent'}
+          actionRequired={scheduledBatches.some(batch => batch.status === 'drafted' && !batch.auto_approve)}
+          statusLabel={scheduledBatches.some(batch => batch.status === 'sending') ? 'Sending now' : scheduledBatches.some(batch => batch.status === 'drafted' && !batch.auto_approve) ? 'Approval required' : activeBatches.length ? `${activeBatches.length} active` : completedBatches.length ? `${completedBatches.length} completed` : 'No batches'}
+          defaultOpen={scheduledBatches.length > 0}
+          openSignal={openSignals.batches}>
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Your Batches</h3>
@@ -2083,31 +2284,99 @@ export default function Scheduled() {
               <Plus className="w-3 h-3" /> Add Another Batch
             </button>
           </div>
+          {batchFilter !== 'all' && (
+            <div className="mb-4 flex items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-950/20">
+              <span className="text-[10px] font-semibold text-amber-800 dark:text-amber-300">Filter: {batchFilter}</span>
+              <button type="button" onClick={() => setBatchFilter('all')} className="text-[10px] font-semibold text-amber-700 hover:underline">Clear filter</button>
+            </div>
+          )}
           {scheduledBatches.length === 0 ? (
             <div className="text-center py-10"><Clock className="w-7 h-7 text-gray-200 mx-auto mb-2" /><p className="text-xs text-muted">No scheduled batches yet - import and schedule above</p></div>
           ) : (
-            <div className="space-y-3">
-              {scheduledBatches.map(b => (
-                <BatchCard
-                  key={b.id}
-                  batch={b}
-                  expanded={expandedBatchId === b.id}
-                  onExpand={() => setExpandedBatchId(prev => prev === b.id ? null : b.id)}
-                  onRefresh={() => { loadSession(); fetchRoster(); }}
-                  onBatchDeleted={(id) => {
-                    setExpandedBatchId(prev => prev === id ? null : prev);
-                    setScheduledBatches(prev => prev.filter(b => b.id !== id));
-                    setRosterRows([]);
-                    loadSession();
-                  }}
-                />
-              ))}
+            <div className="space-y-6">
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-semibold text-gray-900 dark:text-gray-100">Scheduled batches</h4>
+                    <p className="text-[10px] text-muted">Pending, processing, drafted, scheduled, and sending.</p>
+                  </div>
+                  <span className="text-[10px] text-muted">{visibleActiveBatches.length}</span>
+                </div>
+                {visibleActiveBatches.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-gray-200 dark:border-neutral-700 py-6 text-center text-xs text-muted">No active scheduled batches.</div>
+                ) : visibleActiveBatches.map(b => (
+                  <BatchCard
+                    key={b.id}
+                    batch={b}
+                    expanded={expandedBatchId === b.id}
+                    onExpand={() => setExpandedBatchId(prev => prev === b.id ? null : b.id)}
+                    onRefresh={() => { loadSession(); fetchRoster(); }}
+                    onBatchDeleted={(id) => {
+                      setExpandedBatchId(prev => prev === id ? null : prev);
+                      setScheduledBatches(prev => prev.filter(batch => batch.id !== id));
+                      setRosterRows([]);
+                      loadSession();
+                    }}
+                  />
+                ))}
+              </section>
+
+              <section className="space-y-3 border-t border-[rgb(var(--border-subtle))] pt-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">Completed batches</h4>
+                    <p className="text-[10px] text-muted">Permanent history with every sent, failed, and unsent email.</p>
+                  </div>
+                  <span className="text-[10px] text-muted">{visibleCompletedBatches.length}</span>
+                </div>
+                {visibleCompletedBatches.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-emerald-200 dark:border-emerald-900/40 py-6 text-center text-xs text-muted">Completed batches will appear here permanently.</div>
+                ) : visibleCompletedBatches.map(b => (
+                  <BatchCard
+                    key={b.id}
+                    batch={b}
+                    expanded={expandedBatchId === b.id}
+                    onExpand={() => setExpandedBatchId(prev => prev === b.id ? null : b.id)}
+                    onRefresh={() => { loadSession(); fetchRoster(); }}
+                    onBatchDeleted={() => {}}
+                  />
+                ))}
+              </section>
             </div>
           )}
         </StepCard>
       </div>
-      <DeliveryFailureCard failures={deliveryFailures} onRefresh={fetchDeliveryFailures} />
-      <ReplyAnalyticsSection replies={replies} onRefresh={loadSession} />
+      </WorkflowSlide>
+      <WorkflowSlide id="failures" title="Delivery failures" icon={AlertTriangle} badge={deliveryFailures.length || undefined}>
+      <div ref={sectionFailuresRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${highlightTarget === 'failures' ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
+        <StepCard step={5} title="Delivery failures" subtitle="Bounces, not-found addresses, and Gmail limits" icon={AlertTriangle} owner="user" actionRequired={deliveryFailures.some(item => item.status === 'pending')} statusLabel={`${deliveryFailures.length} records`} openSignal={openSignals.failures}>
+          <DeliveryFailureCard failures={deliveryFailures} onRefresh={fetchDeliveryFailures} filter={failureFilter} onClearFilter={() => setFailureFilter('all')} />
+        </StepCard>
+      </div>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="duplicates" title="Duplicates" icon={ShieldCheck} badge={pendingSkippedDuplicates.length || undefined}>
+        <div ref={sectionDuplicatesRef} className="scroll-mt-20">
+        <StepCard step={6} title="Duplicates" subtitle="Previously contacted professors are automatically blocked" icon={ShieldCheck} owner="agent" statusLabel={pendingSkippedDuplicates.length ? `${pendingSkippedDuplicates.length} skipped` : 'Protected'} openSignal={openSignals.duplicates}>
+          {pendingSkippedDuplicates.length ? (
+            <div className="max-h-72 overflow-auto rounded-xl border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-900/40 dark:bg-amber-950/15">
+              {pendingSkippedDuplicates.map(item => <p key={item.email} className="border-b border-amber-200/60 py-2 font-mono text-[11px] last:border-0">{item.email}</p>)}
+            </div>
+          ) : (
+            <p className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 text-xs text-emerald-700 dark:border-emerald-900/40 dark:bg-emerald-950/15 dark:text-emerald-300">Permanent sent-history protection is active. No duplicates are waiting.</p>
+          )}
+        </StepCard>
+        </div>
+      </WorkflowSlide>
+
+      <WorkflowSlide id="replies" title="Replies" icon={Mail} badge={replies.length || undefined}>
+      <div ref={sectionRepliesRef} className={`scroll-mt-20 rounded-2xl transition-shadow ${highlightTarget === 'replies' ? 'ring-2 ring-brand-400 ring-offset-2' : ''}`}>
+        <StepCard step={7} title="Replies" subtitle="Classified professor replies and manual response actions" icon={Mail} owner="user" statusLabel={`${replies.length} replies`} openSignal={openSignals.replies}>
+          <ReplyAnalyticsSection replies={replies} onRefresh={loadSession} filter={replyFilter} onClearFilter={() => setReplyFilter('all')} openSignal={openSignals.replies} />
+        </StepCard>
+      </div>
+      </WorkflowSlide>
+      </WorkflowDeck>
     </WorkflowPage>
   );
 }

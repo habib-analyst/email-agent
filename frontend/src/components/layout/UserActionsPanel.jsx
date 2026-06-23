@@ -8,8 +8,8 @@ import SectionShell from './SectionShell.jsx';
 export default function UserActionsPanel({
   children,
   className = '',
-  title = 'User actions',
-  subtitle = 'Start, retry, skip duplicates, run batch, and campaign tools',
+  title = 'Your controls',
+  subtitle = 'Actions that require your decision or approval',
 }) {
   return (
     <SectionShell

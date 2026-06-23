@@ -17,18 +17,22 @@ export default function SectionShell({
   noPadding = false,
   collapsible = false,
   defaultOpen = true,
+  openSignal = 0,
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  React.useEffect(() => {
+    if (openSignal) setOpen(true);
+  }, [openSignal]);
 
   const toggle = () => {
     if (collapsible) setOpen(v => !v);
   };
 
   return (
-    <section className={`panel overflow-hidden ${className}`}>
+    <section className={`panel overflow-hidden transition-shadow duration-200 hover:shadow-md ${className}`}>
       {(title || subtitle) && (
         <div
-          className={`panel-header ${collapsible ? 'cursor-pointer select-none hover:bg-[rgb(var(--surface-muted))]/60 transition-colors' : ''}`}
+          className={`panel-header bg-gradient-to-r from-[rgb(var(--surface-muted))]/55 via-[rgb(var(--surface-card))] to-[rgb(var(--surface-card))] ${collapsible ? 'cursor-pointer select-none hover:bg-[rgb(var(--surface-muted))]/60 transition-colors' : ''}`}
           onClick={collapsible ? toggle : undefined}
           onKeyDown={collapsible ? (e) => {
             if (e.key === 'Enter' || e.key === ' ') {

@@ -168,7 +168,8 @@ function parseRow(row, indices) {
   if (!last_name && full_name) last_name = lastNameFromFullName(full_name) || '';
   if (!full_name && last_name) full_name = last_name;
 
-  const university = cellAt(row, indices.university) || universityFromEmail(email);
+  const rosterUniversity = cellAt(row, indices.university);
+  const university = rosterUniversity || universityFromEmail(email);
   const profile_url = cellAt(row, indices.profile_url) || inferred.urlCandidate || '';
 
   return {
@@ -176,6 +177,7 @@ function parseRow(row, indices) {
     full_name: full_name || null,
     last_name: last_name || null,
     university: university || null,
+    university_source: rosterUniversity ? 'roster' : 'email_domain',
     research_interest: research_interest || null,
     subject_keyword: subject_keyword || null,
     interest_line: interest_line || null,
@@ -234,7 +236,7 @@ function entryToNormalizedRow(entry) {
 }
 
 export function entriesToNormalizedSheet(entries) {
-  const cols = ['full_name', 'last_name', 'email', 'subject_keyword', 'interest_line'];
+  const cols = ['full_name', 'last_name', 'email', 'university', 'subject_keyword', 'interest_line'];
   const displayHeaders = cols.map(h => STANDARD_IMPORT_DISPLAY_HEADERS[STANDARD_IMPORT_HEADERS.indexOf(h)]);
   return {
     name: 'Organized import',

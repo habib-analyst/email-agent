@@ -7,11 +7,11 @@ import {
   validateToken,
   commitPendingTokens,
   discardPendingTokens,
+  runWithPendingTokens,
   disconnect as oauthDisconnect,
 } from '../auth/index.js';
 import { eventBus } from '../core/EventBus.js';
 import { config } from '../config/index.js';
-import { createHash } from 'crypto';
 import {
   getSenderIdentity,
   setConnectedSender,
@@ -20,19 +20,19 @@ import {
   looksLikeDerivedName,
 } from './senderIdentity.js';
 import { clearGmailCache } from '../gmail/index.js';
-import { activateAnonymousWorkspace, activateUserWorkspace, getActiveWorkspace } from '../db/index.js';
+import { ensureUserWorkspace, getActiveWorkspace, runWithTenantKey } from '../db/index.js';
 import { invalidateUniversityOutreachCache } from '../learning/universityOutreach.js';
 import { invalidateEpochCache } from '../session/epoch.js';
-import { applyUserApiKeysFromDb } from './userApiKeys.js';
-import { registerTenant, roleForEmail, touchTenant } from './tenantRegistry.js';
+import { createTenantSession, registerTenant, roleForEmail, touchTenant } from './tenantRegistry.js';
 
 const VALIDATE_CACHE_MS = 5 * 60 * 1000;
-let validateCache = { result: null, at: 0 };
-let validateInFlight = null;
+const validateCaches = new Map();
+const validateInFlight = new Map();
 
 function clearValidateCache() {
-  validateCache = { result: null, at: 0 };
-  validateInFlight = null;
+  const tenant = getActiveWorkspace().key || 'anonymous';
+  validateCaches.delete(tenant);
+  validateInFlight.delete(tenant);
 }
 
 async function stopRuntimeForWorkspaceChange() {
@@ -49,34 +49,6 @@ async function stopRuntimeForWorkspaceChange() {
   }
 }
 
-async function restartRuntimeAfterWorkspaceChange() {
-  invalidateUniversityOutreachCache();
-  invalidateEpochCache();
-  clearGmailCache();
-  applyUserApiKeysFromDb();
-
-  const [{ PipelineService }, { startScheduler }] = await Promise.all([
-    import('./PipelineService.js'),
-    import('../pipeline/scheduler.js'),
-  ]);
-  PipelineService.startCronJobs();
-  PipelineService.start();
-  startScheduler();
-}
-
-async function switchWorkspace(email) {
-  const key = createWorkspaceKey(email);
-  if (getActiveWorkspace().key === key) return false;
-  await stopRuntimeForWorkspaceChange();
-  await activateUserWorkspace(email);
-  await restartRuntimeAfterWorkspaceChange();
-  return true;
-}
-
-function createWorkspaceKey(email) {
-  return createHash('sha256').update(String(email || '').trim().toLowerCase()).digest('hex').slice(0, 24);
-}
-
 export class GmailNotConnectedError extends Error {
   constructor(message = 'Gmail not connected') {
     super(message);
@@ -89,8 +61,10 @@ async function syncSenderFromGmail({ force = false } = {}) {
   if (!isAuthenticated()) return null;
   const profile = await fetchGmailProfile({ force });
   if (!profile?.email) return null;
-  await switchWorkspace(profile.email);
   const existing = getSenderIdentity();
+  if (existing.email && existing.email.toLowerCase() !== profile.email.toLowerCase()) {
+    throw new Error('Connected Gmail does not match this tenant session');
+  }
   const name = pickSenderDisplayName(profile.name, profile.email, existing.name);
   const updated = setConnectedSender(profile.email, name);
   registerTenant({
@@ -139,13 +113,15 @@ export const AuthService = {
    * Cached for 5 minutes so polling /bootstrap does not hammer Google APIs.
    */
   async validateConnection({ force = false } = {}) {
+    const tenant = getActiveWorkspace().key || 'anonymous';
+    const validateCache = validateCaches.get(tenant) || { result: null, at: 0 };
     const now = Date.now();
     if (!force && validateCache.result && now - validateCache.at < VALIDATE_CACHE_MS) {
       return validateCache.result;
     }
-    if (validateInFlight) return validateInFlight;
+    if (validateInFlight.has(tenant)) return validateInFlight.get(tenant);
 
-    validateInFlight = (async () => {
+    const inFlight = (async () => {
       try {
         const hadTokens = isAuthenticated();
         const { valid, reason } = await validateToken();
@@ -175,81 +151,67 @@ export const AuthService = {
           workspaceKey: getActiveWorkspace().key,
         });
         touchTenant(sender.email);
-        validateCache = { result, at: Date.now() };
+        validateCaches.set(tenant, { result, at: Date.now() });
         return result;
       } finally {
-        validateInFlight = null;
+        validateInFlight.delete(tenant);
       }
     })();
 
-    return validateInFlight;
+    validateInFlight.set(tenant, inFlight);
+    return inFlight;
   },
 
   getAuthUrl() {
     return oauthGetAuthUrl();
   },
 
-  async connectWithCode(code) {
-    const previousEmail = getSenderIdentity().email;
+  async connectWithCode(code, state) {
+    let tokens;
     let profile;
     try {
-      await oauthHandleCallback(code);
-      clearGmailCache();
-      clearValidateCache();
-
-      profile = await fetchGmailProfile({ force: true });
+      tokens = await oauthHandleCallback(code, state);
+      profile = await runWithPendingTokens(tokens, async () => {
+        clearGmailCache();
+        clearValidateCache();
+        return fetchGmailProfile({ force: true });
+      });
       if (!profile?.email) {
         throw new Error('Connected to Gmail but could not read your email address');
       }
-      if (previousEmail && previousEmail.toLowerCase() !== profile.email.toLowerCase()) {
-        throw new Error(`Disconnect ${previousEmail} before connecting ${profile.email}`);
-      }
     } catch (error) {
-      await discardPendingTokens();
+      await discardPendingTokens(tokens);
       throw error;
     }
 
-    const workspaceSwitched = await switchWorkspace(profile.email);
-    commitPendingTokens();
-    const existing = getSenderIdentity();
-    const sender = setConnectedSender(
-      profile.email,
-      pickSenderDisplayName(profile.name, profile.email, existing.name),
-    );
-    registerTenant({
-      email: sender.email,
-      displayName: sender.name,
-      workspaceKey: getActiveWorkspace().key,
-      login: true,
-    });
-    const switched = !!(previousEmail && previousEmail.toLowerCase() !== sender.email.toLowerCase());
-
-    eventBus.publish({
-      type: 'gmail_connected',
-      at: Date.now(),
-      email: sender.email,
-      name: sender.name,
-      switched,
-      previousEmail: switched ? previousEmail : undefined,
-    });
-
-    if (switched) {
-      console.log(`[Auth] Gmail account switched: ${previousEmail} → ${sender.email}`);
+    const workspace = await ensureUserWorkspace(profile.email);
+    return runWithTenantKey(workspace.key, async () => {
+      commitPendingTokens(tokens);
+      const existing = getSenderIdentity();
+      const sender = setConnectedSender(
+        profile.email,
+        pickSenderDisplayName(profile.name, profile.email, existing.name),
+      );
+      registerTenant({
+        email: sender.email,
+        displayName: sender.name,
+        workspaceKey: workspace.key,
+        login: true,
+      });
+      const sessionToken = createTenantSession(sender.email);
       eventBus.publish({
-        type: 'gmail_account_switched',
+        type: 'gmail_connected',
         at: Date.now(),
         email: sender.email,
-        previousEmail,
+        name: sender.name,
       });
-    }
-
-    return { email: sender.email, name: sender.name, switched: switched || workspaceSwitched };
+      return { email: sender.email, name: sender.name, sessionToken };
+    });
   },
 
   async disconnect() {
     await stopRuntimeForWorkspaceChange();
     await oauthDisconnect();
-    await activateAnonymousWorkspace();
     clearConnectedSender();
     clearGmailCache();
     clearValidateCache();
@@ -260,7 +222,10 @@ export const AuthService = {
 
   getFrontendRedirect(success, params = {}) {
     const base = config.frontendUrl.replace(/\/$/, '');
-    if (success) return `${base}/?gmail=connected`;
+    if (success) {
+      const session = params.session ? `&session=${encodeURIComponent(params.session)}` : '';
+      return `${base}/?gmail=connected${session}`;
+    }
     const msg = params.msg ? `&msg=${encodeURIComponent(params.msg)}` : '';
     return `${base}/?gmail=error${msg}`;
   },

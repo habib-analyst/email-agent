@@ -7,6 +7,7 @@ import {
   BASIC_INSTRUCTIONS,
   BASIC_SUBJECT,
 } from '../gmail/templateSeeder.js';
+import { closeCurrentInstantQueue } from '../services/instantQueueGroups.js';
 
 const DEFAULT_INSTRUCTIONS = `ONLY change 3 things per email — the rest must stay EXACTLY as in the template:
 
@@ -28,7 +29,17 @@ TEMPLATE STRUCTURE (do NOT change any other part):
 const DEFAULT_SUBJECT = '[Keyword] Seeking an MS/PhD Position in Your Lab';
 
 /** Permanent history/analytics tables — never cleared by reset (used across all modes). */
-const ANALYTICS_TABLES = ['sent_email_history', 'sent_log', 'replies', 'learning_stats', 'scheduled_sent_log', 'scheduled_replies'];
+const ANALYTICS_TABLES = [
+  'sent_email_history',
+  'sent_log',
+  'replies',
+  'reply_scenarios',
+  'delivery_failures',
+  'learning_stats',
+  'scheduled_sent_log',
+  'scheduled_replies',
+  'university_locations',
+];
 
 function countRows(db, table) {
   return db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get().c;
@@ -86,8 +97,10 @@ function resetScheduledTemplate(db, mode) {
 /** Full reset — clears active work for all modes; analytics + archive preserved. */
 export function resetSessionData(db) {
   const wipe = db.transaction(() => {
-    db.prepare('DELETE FROM queue').run();
-    db.prepare('DELETE FROM professors').run();
+    closeCurrentInstantQueue('instant');
+    closeCurrentInstantQueue('basic_instant');
+    db.prepare('DELETE FROM queue WHERE queue_group_id IS NULL').run();
+    db.prepare('DELETE FROM professors WHERE id NOT IN (SELECT DISTINCT professor_id FROM queue)').run();
     resetInstantTemplate(db, 'instant');
     resetInstantTemplate(db, 'basic_instant');
     try {
@@ -108,12 +121,14 @@ export function resetSessionData(db) {
 export function resetByMode(db, mode) {
   const wipe = db.transaction(() => {
     if (mode === 'instant') {
-      db.prepare('DELETE FROM queue WHERE mode=? OR mode IS NULL').run('instant');
-      db.prepare('DELETE FROM professors WHERE mode=? OR mode IS NULL').run('instant');
+      closeCurrentInstantQueue('instant');
+      db.prepare('DELETE FROM queue WHERE (mode=? OR mode IS NULL) AND queue_group_id IS NULL').run('instant');
+      db.prepare("DELETE FROM professors WHERE (mode='instant' OR mode IS NULL) AND id NOT IN (SELECT DISTINCT professor_id FROM queue)").run();
       resetInstantTemplate(db, 'instant');
     } else if (mode === 'basic_instant') {
-      db.prepare('DELETE FROM queue WHERE mode=?').run('basic_instant');
-      db.prepare('DELETE FROM professors WHERE mode=?').run('basic_instant');
+      closeCurrentInstantQueue('basic_instant');
+      db.prepare('DELETE FROM queue WHERE mode=? AND queue_group_id IS NULL').run('basic_instant');
+      db.prepare("DELETE FROM professors WHERE mode='basic_instant' AND id NOT IN (SELECT DISTINCT professor_id FROM queue)").run();
       resetInstantTemplate(db, 'basic_instant');
     } else if (mode === 'scheduled') {
       resetScheduledTemplate(db, 'scheduled');
@@ -138,7 +153,7 @@ export function resetByMode(db, mode) {
 
 export function verifySessionCleared(db) {
   return {
-    queue: countRows(db, 'queue'),
+    queue: db.prepare("SELECT COUNT(*) AS c FROM queue WHERE state NOT IN ('sent','replied','failed','skipped')").get().c,
     professors: countRows(db, 'professors'),
     sent_email_history: countRows(db, 'sent_email_history'),
     sent_log: countRows(db, 'sent_log'),
@@ -149,8 +164,7 @@ export function verifySessionCleared(db) {
 
 export function isSessionCleared(db) {
   const c = verifySessionCleared(db);
-  return c.queue === 0 && c.professors === 0
-    ;
+  return c.queue === 0;
 }
 
 export function performFullReset(db) {
